@@ -26,24 +26,34 @@ def _check_exit_v2(
     bt_cfg: BacktestConfig,
     signal_type: int,
 ) -> tuple[float | None, str]:
-    """V2 exit logic with trailing stop to let winners run."""
+    """V3 exit logic — trailing stop, breakeven, time-decay, improved stress."""
 
-    # Forced flatten before session close
+    bars_held = bar_idx - trade.entry_bar
+    current_pnl = (row["close"] - trade.entry_price) * trade.direction
+    atr = row.get("atr_14", 0)
+    if pd.isna(atr):
+        atr = 0
+
+    # ── Forced flatten before session close ───────────────────────────
     if ct_minutes >= 900:
         return row["close"], "session_flatten"
 
-    # Max hold time
-    bars_held = bar_idx - trade.entry_bar
-    if bars_held >= strategy_cfg.max_hold_bars:
-        return row["close"], "max_hold"
-
-    # Stress regime: only exit if trade is losing
+    # ── Stress regime: exit after 6 bars always, or immediately if losing
     if row.get("regime") == 0:
-        current_pnl = (row["close"] - trade.entry_price) * trade.direction
+        if bars_held > 6:
+            return row["close"], "stress_exit"
         if current_pnl < 0:
             return row["close"], "stress_exit"
 
-    # Standard SL/TP
+    # ── Time-decay exit: if losing after 18 bars (1.5 hours), cut
+    if bars_held >= 18 and current_pnl < 0:
+        return row["close"], "time_decay"
+
+    # ── Max hold time ─────────────────────────────────────────────────
+    if bars_held >= strategy_cfg.max_hold_bars:
+        return row["close"], "max_hold"
+
+    # ── Standard SL/TP ────────────────────────────────────────────────
     if trade.direction == 1:
         if row["low"] <= trade.sl_price:
             return trade.sl_price + (bt_cfg.slippage_ticks * bt_cfg.tick_size), "stop_loss"
@@ -55,36 +65,38 @@ def _check_exit_v2(
         if row["low"] <= trade.tp_price:
             return trade.tp_price + (bt_cfg.slippage_ticks * bt_cfg.tick_size), "take_profit"
 
-    # ── Trailing stop: lock in profits ────────────────────────────────
-    # Track max favorable excursion
+    # ── Track peak profit for trailing stop ───────────────────────────
     if trade.direction == 1:
-        current_profit = row["high"] - trade.entry_price
+        bar_max_profit = row["high"] - trade.entry_price
     else:
-        current_profit = trade.entry_price - row["low"]
+        bar_max_profit = trade.entry_price - row["low"]
 
-    if current_profit > trade.peak_profit:
-        trade.peak_profit = current_profit
+    if bar_max_profit > trade.peak_profit:
+        trade.peak_profit = bar_max_profit
 
-    # Once profit exceeds 50% of target, trail at 40% of peak
-    stop_distance = abs(trade.entry_price - trade.sl_price)
     target_distance = abs(trade.tp_price - trade.entry_price)
-    if trade.peak_profit > target_distance * 0.50:
-        trail_level = trade.peak_profit * 0.60  # Keep 60% of peak profit
-        current_pnl = (row["close"] - trade.entry_price) * trade.direction
-        if current_pnl < trail_level * 0.40:
-            # Profit has pulled back more than 60% from peak — trail out
+
+    # ── Breakeven stop: after 1.5 ATR profit, protect entry ──────────
+    if atr > 0 and trade.peak_profit > atr * 1.5:
+        if current_pnl <= 0:
+            return row["close"], "breakeven_stop"
+
+    # ── Trailing stop: activate at 75% of target, keep 50% of peak ───
+    if target_distance > 0 and trade.peak_profit > target_distance * 0.75:
+        trail_level = trade.peak_profit * 0.50  # Keep 50% of peak profit
+        if current_pnl < trail_level * 0.50:
+            # Profit pulled back >50% from trail level
             return row["close"], "trailing_stop"
 
-    # VWAP reversion: exit when price returns to VWAP (but only if profitable)
+    # ── VWAP reversion: exit near VWAP band (±0.5 ATR) if profitable ─
     if signal_type == SignalType.VWAP_REVERSION:
         vwap = row.get("vwap", None)
-        if vwap is not None and not pd.isna(vwap):
-            current_pnl = (row["close"] - trade.entry_price) * trade.direction
-            if current_pnl > 0:
-                if trade.direction == 1 and row["close"] >= vwap:
-                    return row["close"], "vwap_target"
-                if trade.direction == -1 and row["close"] <= vwap:
-                    return row["close"], "vwap_target"
+        if vwap is not None and not pd.isna(vwap) and atr > 0 and current_pnl > 0:
+            vwap_band = 0.5 * atr
+            if trade.direction == 1 and row["close"] >= (vwap - vwap_band):
+                return row["close"], "vwap_target"
+            if trade.direction == -1 and row["close"] <= (vwap + vwap_band):
+                return row["close"], "vwap_target"
 
     return None, ""
 
@@ -97,11 +109,14 @@ def run_backtest_v2(
     scorer: TradeScorer | None = None,
     starting_balance: float = 50_000.0,
     collect_features: bool = False,
-    immortal: bool = False,
+    training_mode: bool = False,
+    risk_engine: RiskEngine | None = None,
 ) -> tuple[BacktestResult, pd.DataFrame]:
     """V2 backtest with session features + improved signals.
 
-    immortal: if True, resets balance each day (never killed). Use for training data collection.
+    training_mode: if True, resets is_killed each day for data collection.
+                   Does NOT reset balance (preserves realistic equity dynamics).
+    risk_engine: optional shared RiskEngine (for multi-instrument portfolio heat).
     """
 
     # Compute all features
@@ -110,14 +125,17 @@ def run_backtest_v2(
     df = add_regime(df)
     df["signal"], df["signal_type"] = generate_signals_v2(df)
 
-    risk = RiskEngine(risk_cfg, starting_balance)
+    risk = risk_engine if risk_engine is not None else RiskEngine(risk_cfg, starting_balance)
     trades: list[Trade] = []
     active_trade: Trade | None = None
     active_signal_type: int = SignalType.NONE
-    equity = starting_balance
+    equity = risk.state.current_balance
     equity_curve = []
     current_date = ""
     feature_records: list[dict] = []
+
+    # Signal-type consecutive loss tracking for circuit breaker
+    signal_type_losses: dict[int, int] = {}
 
     for i in range(len(df)):
         row = df.iloc[i]
@@ -132,13 +150,12 @@ def run_backtest_v2(
 
         if date_str != current_date and current_date:
             risk.end_day(current_date)
-            if immortal:
-                # Reset for next day — collect unlimited training data
+            if training_mode:
+                # Only reset kill flag — preserve balance for realistic dynamics
                 risk.state.is_killed = False
-                risk.state.current_balance = starting_balance
-                risk.state.total_pnl = 0.0
                 risk.state.consecutive_losses = 0
-                equity = starting_balance
+            # Reset signal-type circuit breakers daily
+            signal_type_losses.clear()
         current_date = date_str
 
         # ── Check exit ────────────────────────────────────────────────
@@ -150,6 +167,14 @@ def run_backtest_v2(
                 _close_trade(active_trade, exit_price, i, exit_reason, bt_cfg, risk)
                 trades.append(active_trade)
                 equity = risk.state.current_balance
+
+                # Track signal-type losses for circuit breaker
+                net_pnl = active_trade.pnl - active_trade.fees
+                if net_pnl <= 0:
+                    signal_type_losses[active_signal_type] = signal_type_losses.get(active_signal_type, 0) + 1
+                else:
+                    signal_type_losses[active_signal_type] = 0
+
                 active_trade = None
                 active_signal_type = SignalType.NONE
 
@@ -158,8 +183,29 @@ def run_backtest_v2(
             if risk.can_trade(ct_minutes, strategy_cfg.max_trades_per_day):
                 atr = row.get("atr_14", 0)
                 atr_50 = row.get("atr_50", 0)
-                # Volatility gate: skip when ATR is 2x+ its 50-bar average (crash days)
+
+                # ── Trade filters ─────────────────────────────────────
+                # Percentile vol gate: skip if ATR below 50th percentile of last 200 bars
+                if i >= 200 and not pd.isna(atr):
+                    atr_lookback = df["atr_14"].iloc[max(0, i - 200):i].dropna()
+                    if len(atr_lookback) > 0 and atr < atr_lookback.quantile(0.50):
+                        equity_curve.append(equity)
+                        continue
+
+                # Time cutoff: no new entries after 1:30 PM CT
+                if ct_minutes >= 810:
+                    equity_curve.append(equity)
+                    continue
+
+                # Signal-type circuit breaker: 3 consecutive losses → skip
+                sig_type = int(row["signal_type"])
+                if signal_type_losses.get(sig_type, 0) >= 3:
+                    equity_curve.append(equity)
+                    continue
+
+                # Volatility spike gate: skip extreme vol days
                 vol_gated = not pd.isna(atr_50) and atr_50 > 0 and atr > atr_50 * 2.0
+
                 if not vol_gated and not pd.isna(atr) and atr > 0:
                     # AI scoring
                     ai_features = {}
@@ -170,18 +216,18 @@ def run_backtest_v2(
                         ai_features = extract_ai_features(df, i)
                         if scorer and scorer.model is not None:
                             should_take, win_prob = scorer.should_trade(ai_features)
+                            # Minimum confidence floor
+                            if win_prob < 0.55:
+                                should_take = False
 
                     if should_take:
-                        sig_type = int(row["signal_type"])
-
                         # Signal-type-specific stop/target sizing
-                        # Wider stops to survive noise, higher R:R to compensate
                         if sig_type == SignalType.ORB:
-                            sl_mult, rr_ratio = 2.5, 2.0  # Wide stop for breakout noise
+                            sl_mult, rr_ratio = 2.5, 2.0
                         elif sig_type == SignalType.VWAP_REVERSION:
-                            sl_mult, rr_ratio = 2.0, 1.5  # VWAP target is the exit anyway
+                            sl_mult, rr_ratio = 2.0, 1.5
                         else:  # TREND_CONTINUATION
-                            sl_mult, rr_ratio = 2.5, 3.0  # Let winners run big
+                            sl_mult, rr_ratio = 2.5, 3.0
 
                         size = risk.compute_position_size(atr, bt_cfg.tick_size, bt_cfg.tick_value)
                         sl_ticks = risk.compute_stop_ticks(atr, bt_cfg.tick_size, sl_mult)

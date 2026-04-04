@@ -37,6 +37,11 @@ class RiskConfig:
     flatten_time_ct: str
     session_start_ct: str
     consistency_target: float
+    max_risk_per_trade: float = 100.0
+    daily_loss_tier1: float = 500.0
+    daily_loss_tier2: float = 1000.0
+    weekly_loss_limit: float = 1500.0
+    max_simultaneous_positions: int = 2
 
 
 @dataclass(frozen=True)

@@ -1,18 +1,18 @@
 """Risk engine — enforces prop firm rules and position sizing.
 
 Topstep rules enforced:
-- Max daily loss limit
+- Tiered daily loss limits ($500 reduce, $1000 stop)
 - Max total loss limit (trailing)
+- Weekly loss limit
 - Consistency target (best day < 50% of total profit)
 - Forced flatten before 3:10 PM CT
 - Max position size
-- Per-trade risk budget
+- Per-trade risk budget with hard dollar cap
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
 
 from loguru import logger
 
@@ -35,16 +35,19 @@ class RiskState:
     total_pnl: float = 0.0
     day_pnl: float = 0.0
     day_trades: int = 0
-    current_position: int = 0  # +N long, -N short, 0 flat
+    current_position: int = 0
     best_day_pnl: float = 0.0
     daily_history: list[DayStats] = field(default_factory=list)
     is_killed: bool = False
     consecutive_losses: int = 0
     consecutive_wins: int = 0
+    week_pnl: float = 0.0
+    is_week_paused: bool = False
+    week_day_count: int = 0
 
 
 class RiskEngine:
-    """Enforces all prop firm risk constraints."""
+    """Enforces all prop firm risk constraints with tiered limits."""
 
     def __init__(self, cfg: RiskConfig, starting_balance: float = 50_000.0) -> None:
         self.cfg = cfg
@@ -58,7 +61,10 @@ class RiskEngine:
         if self.state.is_killed:
             return False
 
-        # Flatten zone: no new trades after flatten_time
+        if self.state.is_week_paused:
+            return False
+
+        # Flatten zone
         flatten_h, flatten_m = map(int, self.cfg.flatten_time_ct.split(":"))
         flatten_minutes = flatten_h * 60 + flatten_m
         if current_time_ct_minutes >= flatten_minutes:
@@ -68,8 +74,8 @@ class RiskEngine:
         if self.state.day_trades >= max_trades_per_day:
             return False
 
-        # Daily loss check — stop trading for the day at 75% of limit
-        if self.state.day_pnl <= -self.cfg.max_daily_loss * 0.75:
+        # Tiered daily loss — hard stop at tier2
+        if self.state.day_pnl <= -self.cfg.daily_loss_tier2:
             return False
 
         # Total loss check — hard stop at 90% of limit
@@ -82,18 +88,28 @@ class RiskEngine:
     def compute_position_size(self, atr: float, tick_size: float, tick_value: float) -> int:
         """Compute position size based on ATR and risk budget.
 
-        Adaptive sizing:
-        - Base: risk_per_trade_pct * current_balance
-        - After 2 consecutive losses: reduce to 50%
-        - After 3+ consecutive losses: reduce to 25%
-        - Scale back up after wins
+        Tiered sizing:
+        - Base: risk_per_trade_pct * balance, capped at max_risk_per_trade
+        - After daily loss tier1: reduce to 1 contract
+        - After 2 consecutive losses: 50% reduction
+        - After 3+ consecutive losses: 25% reduction
         """
         if atr <= 0:
             return 0
 
         risk_budget = self.cfg.risk_per_trade_pct / 100 * self.state.current_balance
 
-        # Adaptive scaling based on consecutive losses
+        # Hard dollar cap
+        risk_budget = min(risk_budget, self.cfg.max_risk_per_trade)
+
+        # Tiered daily loss reduction
+        if self.state.day_pnl <= -self.cfg.daily_loss_tier1:
+            # After tier1 loss: minimum size only
+            atr_ticks = atr / tick_size
+            risk_per_contract = atr_ticks * tick_value
+            return 1 if risk_per_contract > 0 else 0
+
+        # Consecutive loss scaling
         if self.state.consecutive_losses >= 3:
             risk_budget *= 0.25
         elif self.state.consecutive_losses >= 2:
@@ -105,9 +121,10 @@ class RiskEngine:
             risk_budget *= max(0.25, 1.0 - daily_used_pct)
 
         # Scale down when total P&L is significantly negative
-        total_used_pct = abs(self.state.total_pnl) / self.cfg.max_total_loss if self.cfg.max_total_loss > 0 and self.state.total_pnl < 0 else 0
-        if total_used_pct > 0.30:
-            risk_budget *= max(0.25, 1.0 - total_used_pct)
+        if self.state.total_pnl < 0 and self.cfg.max_total_loss > 0:
+            total_used_pct = abs(self.state.total_pnl) / self.cfg.max_total_loss
+            if total_used_pct > 0.30:
+                risk_budget *= max(0.25, 1.0 - total_used_pct)
 
         atr_ticks = atr / tick_size
         risk_per_contract = atr_ticks * tick_value
@@ -121,7 +138,7 @@ class RiskEngine:
     def compute_stop_ticks(self, atr: float, tick_size: float, multiplier: float = 2.0) -> int:
         """Compute stop-loss distance in ticks based on ATR."""
         if atr <= 0 or tick_size <= 0:
-            return 8  # fallback: 8 ticks = 2 points ES
+            return 8
         return max(4, int((atr * multiplier) / tick_size))
 
     def compute_target_ticks(self, stop_ticks: int, reward_risk: float = 1.5) -> int:
@@ -136,7 +153,6 @@ class RiskEngine:
         self.state.current_balance += net
         self.state.day_trades += 1
 
-        # Track consecutive wins/losses for adaptive sizing
         if net > 0:
             self.state.consecutive_wins += 1
             self.state.consecutive_losses = 0
@@ -156,17 +172,26 @@ class RiskEngine:
         if self.state.day_pnl > self.state.best_day_pnl:
             self.state.best_day_pnl = self.state.day_pnl
 
+        # Weekly tracking
+        self.state.week_pnl += self.state.day_pnl
+        self.state.week_day_count += 1
+
+        # End of week (5 trading days) or weekly loss limit
+        if self.state.week_day_count >= 5:
+            self.state.week_pnl = 0.0
+            self.state.week_day_count = 0
+            self.state.is_week_paused = False
+        elif self.state.week_pnl <= -self.cfg.weekly_loss_limit:
+            self.state.is_week_paused = True
+
         # Reset daily counters
         self.state.day_pnl = 0.0
         self.state.day_trades = 0
 
     def check_consistency(self, profit_target: float) -> bool:
-        """Check if best day violates consistency target.
-
-        Topstep: best day must be < 50% of total profit.
-        """
+        """Check if best day violates consistency target."""
         if self.state.total_pnl <= 0:
-            return True  # Not relevant if not profitable
+            return True
         return self.state.best_day_pnl < (self.cfg.consistency_target * self.state.total_pnl)
 
     @property

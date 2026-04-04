@@ -20,17 +20,22 @@ max_hold_bars = 48          # 240 minutes (4 hours) — let winners run
 max_daily_loss = 2000.0
 max_total_loss = 2000.0     # Maximum Loss Limit
 max_position_size = 5       # Default max contracts per trade
-risk_per_trade_pct = 0.35   # of account balance
+risk_per_trade_pct = 0.20   # of account balance (conservative)
+max_risk_per_trade = 100.0  # Hard dollar cap per trade
+daily_loss_tier1 = 500.0    # Cut to minimum size after this
+daily_loss_tier2 = 1000.0   # Stop trading for the day after this
+weekly_loss_limit = 1500.0  # Pause for week after this
+max_simultaneous_positions = 2  # Portfolio heat limit
 flatten_time_ct = "15:00"   # 3:00 PM CT (10 min buffer before 3:10)
 session_start_ct = "17:00"  # 5:00 PM CT previous day
 consistency_target = 0.50   # best day < 50% of profit target
 
 [backtest]
-train_window_days = 120
+train_window_days = 180     # 6 months for walk-forward training
 val_window_days = 30
 test_window_days = 30
 walk_forward_step_days = 30
-cost_per_side_per_contract = 0.62  # MES Topstep fees (lower than ES)
+cost_per_side_per_contract = 0.62  # MES Topstep fees
 slippage_ticks = 1
 tick_size = 0.25
 tick_value = 1.25           # MES: $1.25 per tick (1/10th of ES)
