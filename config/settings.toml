@@ -10,7 +10,7 @@ user_hub = "https://gateway-rtc-demo.s2f.projectx.com/hubs/user"
 # user_hub = "https://rtc.topstepx.com/hubs/user"
 
 [strategy]
-instrument = "ES"           # E-mini S&P 500
+instrument = "MES"          # Micro E-mini S&P 500 (1/10th ES size)
 bar_interval_minutes = 5
 max_trades_per_day = 8
 max_hold_bars = 24          # 120 minutes max hold
@@ -19,8 +19,8 @@ max_hold_bars = 24          # 120 minutes max hold
 # Topstep $50K account rules
 max_daily_loss = 2000.0
 max_total_loss = 2000.0     # Maximum Loss Limit
-max_position_size = 5       # contracts
-risk_per_trade_pct = 0.25   # of account balance
+max_position_size = 10      # MES contracts (10 MES = 1 ES)
+risk_per_trade_pct = 0.40   # of account balance — room to size with MES
 flatten_time_ct = "15:00"   # 3:00 PM CT (10 min buffer before 3:10)
 session_start_ct = "17:00"  # 5:00 PM CT previous day
 consistency_target = 0.50   # best day < 50% of profit target
@@ -30,7 +30,7 @@ train_window_days = 120
 val_window_days = 30
 test_window_days = 30
 walk_forward_step_days = 30
-cost_per_side_per_contract = 1.52  # Topstep fees
+cost_per_side_per_contract = 0.62  # MES Topstep fees (lower than ES)
 slippage_ticks = 1
 tick_size = 0.25
-tick_value = 12.50          # ES: $12.50 per tick
+tick_value = 1.25           # MES: $1.25 per tick (1/10th of ES)

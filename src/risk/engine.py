@@ -39,6 +39,8 @@ class RiskState:
     best_day_pnl: float = 0.0
     daily_history: list[DayStats] = field(default_factory=list)
     is_killed: bool = False
+    consecutive_losses: int = 0
+    consecutive_wins: int = 0
 
 
 class RiskEngine:
@@ -66,13 +68,13 @@ class RiskEngine:
         if self.state.day_trades >= max_trades_per_day:
             return False
 
-        # Daily loss check
-        if self.state.day_pnl <= -self.cfg.max_daily_loss:
+        # Daily loss check — use 80% of limit as soft stop to preserve buffer
+        if self.state.day_pnl <= -self.cfg.max_daily_loss * 0.80:
             logger.warning(f"Daily loss limit hit: ${self.state.day_pnl:.2f}")
             return False
 
-        # Total loss check
-        if self.state.total_pnl <= -self.cfg.max_total_loss:
+        # Total loss check — use 80% of limit as soft stop
+        if self.state.total_pnl <= -self.cfg.max_total_loss * 0.80:
             logger.warning(f"Max loss limit hit: ${self.state.total_pnl:.2f}")
             self.state.is_killed = True
             return False
@@ -82,14 +84,28 @@ class RiskEngine:
     def compute_position_size(self, atr: float, tick_size: float, tick_value: float) -> int:
         """Compute position size based on ATR and risk budget.
 
-        Risk per trade = risk_per_trade_pct * current_balance
-        Size = risk_budget / (atr_in_ticks * tick_value)
-        Capped at max_position_size.
+        Adaptive sizing:
+        - Base: risk_per_trade_pct * current_balance
+        - After 2 consecutive losses: reduce to 50%
+        - After 3+ consecutive losses: reduce to 25%
+        - Scale back up after wins
         """
         if atr <= 0:
             return 0
 
         risk_budget = self.cfg.risk_per_trade_pct / 100 * self.state.current_balance
+
+        # Adaptive scaling based on consecutive losses
+        if self.state.consecutive_losses >= 3:
+            risk_budget *= 0.25
+        elif self.state.consecutive_losses >= 2:
+            risk_budget *= 0.50
+
+        # Also scale down when approaching daily loss limit (within 60%)
+        daily_remaining = self.cfg.max_daily_loss * 0.80 + self.state.day_pnl
+        if daily_remaining < self.cfg.max_daily_loss * 0.40:
+            risk_budget *= 0.50
+
         atr_ticks = atr / tick_size
         risk_per_contract = atr_ticks * tick_value
 
@@ -116,6 +132,14 @@ class RiskEngine:
         self.state.total_pnl += net
         self.state.current_balance += net
         self.state.day_trades += 1
+
+        # Track consecutive wins/losses for adaptive sizing
+        if net > 0:
+            self.state.consecutive_wins += 1
+            self.state.consecutive_losses = 0
+        else:
+            self.state.consecutive_losses += 1
+            self.state.consecutive_wins = 0
 
     def end_day(self, date_str: str) -> None:
         """Finalize daily stats and reset for next day."""
