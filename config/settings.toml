@@ -1,0 +1,36 @@
+[topstep]
+# Demo environment (safe for testing)
+rest_url = "https://gateway-api-demo.s2f.projectx.com"
+market_hub = "https://gateway-rtc-demo.s2f.projectx.com/hubs/market"
+user_hub = "https://gateway-rtc-demo.s2f.projectx.com/hubs/user"
+
+# Live environment (uncomment when ready)
+# rest_url = "https://api.topstepx.com"
+# market_hub = "https://rtc.topstepx.com/hubs/market"
+# user_hub = "https://rtc.topstepx.com/hubs/user"
+
+[strategy]
+instrument = "ES"           # E-mini S&P 500
+bar_interval_minutes = 5
+max_trades_per_day = 6
+max_hold_bars = 24          # 120 minutes max hold
+
+[risk]
+# Topstep $50K account rules
+max_daily_loss = 2000.0
+max_total_loss = 2000.0     # Maximum Loss Limit
+max_position_size = 5       # contracts
+risk_per_trade_pct = 0.25   # of account balance
+flatten_time_ct = "15:00"   # 3:00 PM CT (10 min buffer before 3:10)
+session_start_ct = "17:00"  # 5:00 PM CT previous day
+consistency_target = 0.50   # best day < 50% of profit target
+
+[backtest]
+train_window_days = 120
+val_window_days = 30
+test_window_days = 30
+walk_forward_step_days = 30
+cost_per_side_per_contract = 1.52  # Topstep fees
+slippage_ticks = 1
+tick_size = 0.25
+tick_value = 12.50          # ES: $12.50 per tick
