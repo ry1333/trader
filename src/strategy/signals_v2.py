@@ -78,13 +78,12 @@ def generate_signals_v2(df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
             continue
 
         # ── Trend alignment filter ────────────────────────────────────
-        # Reject signals that fight the 50-bar trend
         close = df["close"].iloc[i]
         ema = ema_50.iloc[i]
         if sig == Signal.LONG and close < ema * 0.998:
-            continue  # Don't long below trend
+            continue
         if sig == Signal.SHORT and close > ema * 1.002:
-            continue  # Don't short above trend
+            continue
 
         signals.iloc[i] = sig
         signal_types.iloc[i] = stype
