@@ -46,8 +46,9 @@ def _check_exit_v2(
         if current_pnl < 0:
             return row["close"], "stress_exit"
 
-    # ── Time-decay exit: if losing after 18 bars (1.5 hours), cut
-    if bars_held >= 18 and current_pnl < 0:
+    # ── Time-decay exit: if significantly losing after 24 bars (2 hours), cut
+    # Audit: 106 time_decay exits at -$6,660. Loosened from 18 to 24 bars.
+    if bars_held >= 24 and current_pnl < -atr * 0.5:
         return row["close"], "time_decay"
 
     # ── Max hold time ─────────────────────────────────────────────────
@@ -77,10 +78,9 @@ def _check_exit_v2(
 
     target_distance = abs(trade.tp_price - trade.entry_price)
 
-    # ── Breakeven stop: after 1.5 ATR profit, protect entry ──────────
-    if atr > 0 and trade.peak_profit > atr * 1.5:
-        if current_pnl <= 0:
-            return row["close"], "breakeven_stop"
+    # ── Breakeven stop: DISABLED — audit showed 144 trades, -$5,419, 0% WR
+    # The stop was triggering on noise pullbacks, not real reversals
+    # Replaced by trailing stop which is more adaptive
 
     # ── Trailing stop: activate at 75% of target, keep 50% of peak ───
     if target_distance > 0 and trade.peak_profit > target_distance * 0.75:
@@ -193,8 +193,9 @@ def run_backtest_v2(
                         equity_curve.append(equity)
                         continue
 
-                # Time cutoff: no new entries after 1:30 PM CT
-                if ct_minutes >= 810:
+                # Time-of-day filter: only trade 8:30 AM - 1:00 PM CT
+                # Audit: pre-open -$3,761, afternoon -$298. Only open/mid-morning/lunch profitable.
+                if ct_minutes < 510 or ct_minutes >= 780:
                     equity_curve.append(equity)
                     continue
 
