@@ -26,7 +26,15 @@ RESULTS_DIR = Path(__file__).resolve().parent.parent / "results"
 
 def load_data() -> pd.DataFrame:
     """Load best available data."""
-    # Prefer Databento 12mo
+    # Prefer Databento 3yr
+    databento_3y = DATA_DIR / "es_5m_3y_databento.csv"
+    if databento_3y.exists():
+        logger.info("Loading Databento 3yr data")
+        df = pd.read_csv(databento_3y)
+        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+        return df
+
+    # Fallback to 12mo
     databento = DATA_DIR / "es_5m_12mo_databento.csv"
     if databento.exists():
         logger.info(f"Loading Databento 12mo data")

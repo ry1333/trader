@@ -68,14 +68,12 @@ class RiskEngine:
         if self.state.day_trades >= max_trades_per_day:
             return False
 
-        # Daily loss check — use 80% of limit as soft stop to preserve buffer
-        if self.state.day_pnl <= -self.cfg.max_daily_loss * 0.80:
-            logger.warning(f"Daily loss limit hit: ${self.state.day_pnl:.2f}")
+        # Daily loss check — stop trading for the day at 75% of limit
+        if self.state.day_pnl <= -self.cfg.max_daily_loss * 0.75:
             return False
 
-        # Total loss check — use 80% of limit as soft stop
-        if self.state.total_pnl <= -self.cfg.max_total_loss * 0.80:
-            logger.warning(f"Max loss limit hit: ${self.state.total_pnl:.2f}")
+        # Total loss check — hard stop at 90% of limit
+        if self.state.total_pnl <= -self.cfg.max_total_loss * 0.90:
             self.state.is_killed = True
             return False
 
@@ -101,10 +99,15 @@ class RiskEngine:
         elif self.state.consecutive_losses >= 2:
             risk_budget *= 0.50
 
-        # Also scale down when approaching daily loss limit (within 60%)
-        daily_remaining = self.cfg.max_daily_loss * 0.80 + self.state.day_pnl
-        if daily_remaining < self.cfg.max_daily_loss * 0.40:
-            risk_budget *= 0.50
+        # Scale down proportionally to remaining daily budget
+        daily_used_pct = abs(self.state.day_pnl) / self.cfg.max_daily_loss if self.cfg.max_daily_loss > 0 else 0
+        if daily_used_pct > 0.30:
+            risk_budget *= max(0.25, 1.0 - daily_used_pct)
+
+        # Scale down when total P&L is significantly negative
+        total_used_pct = abs(self.state.total_pnl) / self.cfg.max_total_loss if self.cfg.max_total_loss > 0 and self.state.total_pnl < 0 else 0
+        if total_used_pct > 0.30:
+            risk_budget *= max(0.25, 1.0 - total_used_pct)
 
         atr_ticks = atr / tick_size
         risk_per_contract = atr_ticks * tick_value
