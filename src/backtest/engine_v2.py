@@ -73,8 +73,12 @@ def run_backtest_v2(
     scorer: TradeScorer | None = None,
     starting_balance: float = 50_000.0,
     collect_features: bool = False,
+    immortal: bool = False,
 ) -> tuple[BacktestResult, pd.DataFrame]:
-    """V2 backtest with session features + improved signals."""
+    """V2 backtest with session features + improved signals.
+
+    immortal: if True, resets balance each day (never killed). Use for training data collection.
+    """
 
     # Compute all features
     df = compute_features(df)
@@ -104,6 +108,13 @@ def run_backtest_v2(
 
         if date_str != current_date and current_date:
             risk.end_day(current_date)
+            if immortal:
+                # Reset for next day — collect unlimited training data
+                risk.state.is_killed = False
+                risk.state.current_balance = starting_balance
+                risk.state.total_pnl = 0.0
+                risk.state.consecutive_losses = 0
+                equity = starting_balance
         current_date = date_str
 
         # ── Check exit ────────────────────────────────────────────────
@@ -122,7 +133,10 @@ def run_backtest_v2(
         if active_trade is None and row["signal"] != Signal.FLAT:
             if risk.can_trade(ct_minutes, strategy_cfg.max_trades_per_day):
                 atr = row.get("atr_14", 0)
-                if not pd.isna(atr) and atr > 0:
+                atr_50 = row.get("atr_50", 0)
+                # Volatility gate: skip when ATR is 2x+ its 50-bar average (crash days)
+                vol_gated = not pd.isna(atr_50) and atr_50 > 0 and atr > atr_50 * 2.0
+                if not vol_gated and not pd.isna(atr) and atr > 0:
                     # AI scoring
                     ai_features = {}
                     should_take = True
@@ -137,13 +151,13 @@ def run_backtest_v2(
                         sig_type = int(row["signal_type"])
 
                         # Signal-type-specific stop/target sizing
-                        # Key: targets must be > stops for positive expectancy
+                        # Wider stops to survive noise, higher R:R to compensate
                         if sig_type == SignalType.ORB:
-                            sl_mult, rr_ratio = 1.5, 2.0  # 1.5 ATR stop, 2:1 R:R
+                            sl_mult, rr_ratio = 2.5, 2.0  # Wide stop for breakout noise
                         elif sig_type == SignalType.VWAP_REVERSION:
-                            sl_mult, rr_ratio = 1.0, 2.0  # Tight stop, 2:1 R:R
+                            sl_mult, rr_ratio = 2.0, 1.5  # VWAP target is the exit anyway
                         else:  # TREND_CONTINUATION
-                            sl_mult, rr_ratio = 1.5, 2.5  # Let winners run
+                            sl_mult, rr_ratio = 2.5, 3.0  # Let winners run big
 
                         size = risk.compute_position_size(atr, bt_cfg.tick_size, bt_cfg.tick_value)
                         sl_ticks = risk.compute_stop_ticks(atr, bt_cfg.tick_size, sl_mult)

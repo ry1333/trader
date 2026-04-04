@@ -19,8 +19,8 @@ max_hold_bars = 24          # 120 minutes max hold
 # Topstep $50K account rules
 max_daily_loss = 2000.0
 max_total_loss = 2000.0     # Maximum Loss Limit
-max_position_size = 10      # MES contracts (10 MES = 1 ES)
-risk_per_trade_pct = 0.30   # of account balance
+max_position_size = 3       # MES contracts — limit single trade damage
+risk_per_trade_pct = 0.20   # of account balance
 flatten_time_ct = "15:00"   # 3:00 PM CT (10 min buffer before 3:10)
 session_start_ct = "17:00"  # 5:00 PM CT previous day
 consistency_target = 0.50   # best day < 50% of profit target

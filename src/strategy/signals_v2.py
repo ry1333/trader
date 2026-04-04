@@ -49,6 +49,9 @@ def generate_signals_v2(df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
     signals = pd.Series(Signal.FLAT, index=df.index, dtype=int)
     signal_types = pd.Series(SignalType.NONE, index=df.index, dtype=int)
 
+    # Pre-compute 50-bar EMA for trend filter
+    ema_50 = df["close"].ewm(span=50).mean()
+
     for i in range(2, len(df)):
         regime = df["regime"].iloc[i]
 
@@ -66,21 +69,25 @@ def generate_signals_v2(df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
 
         # Try each signal type in priority order
         sig, stype = _try_orb(df, i)
-        if sig != Signal.FLAT:
-            signals.iloc[i] = sig
-            signal_types.iloc[i] = stype
+        if sig == Signal.FLAT:
+            sig, stype = _try_vwap_reversion(df, i)
+        if sig == Signal.FLAT:
+            sig, stype = _try_trend_continuation(df, i)
+
+        if sig == Signal.FLAT:
             continue
 
-        sig, stype = _try_vwap_reversion(df, i)
-        if sig != Signal.FLAT:
-            signals.iloc[i] = sig
-            signal_types.iloc[i] = stype
-            continue
+        # ── Trend alignment filter ────────────────────────────────────
+        # Reject signals that fight the 50-bar trend
+        close = df["close"].iloc[i]
+        ema = ema_50.iloc[i]
+        if sig == Signal.LONG and close < ema * 0.998:
+            continue  # Don't long below trend
+        if sig == Signal.SHORT and close > ema * 1.002:
+            continue  # Don't short above trend
 
-        sig, stype = _try_trend_continuation(df, i)
-        if sig != Signal.FLAT:
-            signals.iloc[i] = sig
-            signal_types.iloc[i] = stype
+        signals.iloc[i] = sig
+        signal_types.iloc[i] = stype
 
     return signals, signal_types
 
