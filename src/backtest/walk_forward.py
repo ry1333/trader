@@ -17,6 +17,7 @@ import numpy as np
 import pandas as pd
 from loguru import logger
 
+from src.ai.ev_model import EVScorer, train_ev_model
 from src.ai.model import EnsembleScorer, TradeScorer
 from src.ai.trainer import train_and_save
 from src.backtest.engine import BacktestResult
@@ -133,11 +134,10 @@ def walk_forward(
             "fees": t.fees,
         } for t in train_result.trades])
 
-        model_path = model_dir / f"{instrument}_window_{window_id}.pkl"
-        metadata = train_and_save(
-            trades_data, train_features, model_path,
-            use_ensemble=window.train_trades >= 30,
-        )
+        # Train EV model (predicts dollar P&L, not just win/loss)
+        ev_path = model_dir / f"{instrument}_ev_window_{window_id}.pkl"
+        ev_metadata = train_ev_model(trades_data, train_features, ev_path)
+        metadata = ev_metadata
         window.model_metadata = metadata
 
         if "error" in metadata:
@@ -146,7 +146,7 @@ def walk_forward(
             continue
 
         # ── Phase 2: Validate — sweep thresholds ──────────────────────
-        scorer = EnsembleScorer(model_path)
+        scorer = EVScorer(ev_path)
         best_thresh = 0.50
         best_score = float("-inf")
 

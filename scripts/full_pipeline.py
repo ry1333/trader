@@ -22,9 +22,9 @@ DATA_DIR = Path(__file__).resolve().parent.parent / "data_cache"
 RESULTS_DIR = Path(__file__).resolve().parent.parent / "results"
 
 INSTRUMENT_DATA = {
-    "MES": "es_5m_3y_databento.csv",
-    "MNQ": "nq_5m_2y_databento.csv",
-    # MCL removed — negative OOS, drags combined results
+    "MNQ": "nq_5m_2y_databento.csv",   # Sharpe 1.60
+    "MGC": "gc_5m_2y_databento.csv",    # Sharpe 0.52
+    # MES and M2K dropped — negative OOS
 }
 
 
