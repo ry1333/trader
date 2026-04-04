@@ -1,10 +1,9 @@
 """AI trade scorer — predicts win probability for each setup.
 
-Same pattern as Morgan bot's BreakoutScorer:
-- GradientBoostingClassifier on tabular features
-- Probability output (0.0 - 1.0)
-- Threshold-based filtering
-- Setup quality bonus adjustment
+Two modes:
+- TradeScorer: single model on all features
+- EnsembleScorer: 3 specialized models (momentum, mean-reversion, volatility)
+  with 2-of-3 agreement voting
 """
 
 from __future__ import annotations
@@ -15,7 +14,12 @@ from pathlib import Path
 import numpy as np
 from loguru import logger
 
-from src.ai.features import AI_FEATURE_COLS, extract_ai_features
+from src.ai.features import (
+    AI_FEATURE_COLS,
+    MEAN_REVERSION_FEATURES,
+    MOMENTUM_FEATURES,
+    VOLATILITY_FEATURES,
+)
 
 
 class TradeScorer:
@@ -55,42 +59,95 @@ class TradeScorer:
         logger.info(f"Saved TradeScorer → {path}")
 
     def predict_proba(self, features: dict) -> float:
-        """Predict win probability for a trade setup.
-
-        Returns float 0.0 - 1.0 (probability of profitable trade).
-        """
+        """Predict win probability. No post-hoc adjustments."""
         if self.model is None:
-            return 0.5  # No model loaded, neutral
+            return 0.5
 
         X = np.array([[features.get(name, 0.0) for name in self.feature_names]])
-        # Replace any NaN/inf with 0
         X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
 
         proba = self.model.predict_proba(X)[0]
-        win_prob = float(proba[1])  # [prob_loss, prob_win]
-
-        # Adjust with setup quality bonus (like Morgan's quality bonus)
-        quality = features.get("setup_quality", 0.0)
-        adjusted = win_prob + (quality / 200.0)  # +/- 10% max adjustment
-        return max(0.0, min(1.0, adjusted))
+        return float(proba[1])
 
     def should_trade(self, features: dict) -> tuple[bool, float]:
-        """Decide whether to take a trade.
-
-        Returns (should_take, win_probability).
-        """
         prob = self.predict_proba(features)
         return prob >= self.threshold, prob
 
-    def score_and_rank(self, setups: list[dict]) -> list[tuple[int, float, bool]]:
-        """Score multiple setups and rank by win probability.
 
-        Returns list of (index, probability, should_take) sorted by probability desc.
-        """
-        scored = []
-        for i, features in enumerate(setups):
-            prob = self.predict_proba(features)
-            take = prob >= self.threshold
-            scored.append((i, prob, take))
-        scored.sort(key=lambda x: x[1], reverse=True)
-        return scored
+class EnsembleScorer:
+    """3-model ensemble with agreement voting.
+
+    Momentum, mean-reversion, and volatility models each trained
+    on their own feature subset. Trade only when 2 of 3 agree.
+    """
+
+    def __init__(self, model_path: str | Path | None = None) -> None:
+        self.momentum_model: TradeScorer | None = None
+        self.mr_model: TradeScorer | None = None
+        self.vol_model: TradeScorer | None = None
+        self.min_agreement: int = 2
+        self.threshold: float = 0.50
+        self.model = True  # Compatibility flag for engine_v2 model check
+        self.metadata: dict = {}
+
+        if model_path and Path(model_path).exists():
+            self.load(model_path)
+
+    def load(self, path: str | Path) -> None:
+        with open(path, "rb") as f:
+            data = pickle.load(f)
+        # Load sub-models
+        for attr, key in [("momentum_model", "momentum"), ("mr_model", "mean_reversion"), ("vol_model", "volatility")]:
+            scorer = TradeScorer()
+            scorer.model = data.get(f"{key}_model")
+            scorer.feature_names = data.get(f"{key}_features", [])
+            scorer.threshold = data.get("threshold", 0.50)
+            setattr(self, attr, scorer)
+        self.threshold = data.get("threshold", 0.50)
+        self.metadata = data.get("metadata", {})
+        logger.info(f"Loaded EnsembleScorer: threshold={self.threshold:.2f}, "
+                    f"cv={self.metadata.get('cv_accuracy', 'N/A')}")
+
+    def save(self, path: str | Path) -> None:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        data = {
+            "threshold": self.threshold,
+            "metadata": self.metadata,
+        }
+        for attr, key, feat_list in [
+            ("momentum_model", "momentum", MOMENTUM_FEATURES),
+            ("mr_model", "mean_reversion", MEAN_REVERSION_FEATURES),
+            ("vol_model", "volatility", VOLATILITY_FEATURES),
+        ]:
+            scorer = getattr(self, attr)
+            if scorer:
+                data[f"{key}_model"] = scorer.model
+                data[f"{key}_features"] = scorer.feature_names
+            else:
+                data[f"{key}_model"] = None
+                data[f"{key}_features"] = feat_list
+        with open(path, "wb") as f:
+            pickle.dump(data, f)
+        logger.info(f"Saved EnsembleScorer → {path}")
+
+    def predict_proba(self, features: dict) -> float:
+        """Average probability across sub-models."""
+        probs = []
+        for scorer in [self.momentum_model, self.mr_model, self.vol_model]:
+            if scorer and scorer.model is not None:
+                probs.append(scorer.predict_proba(features))
+        return np.mean(probs) if probs else 0.5
+
+    def should_trade(self, features: dict) -> tuple[bool, float]:
+        """2-of-3 voting with average probability."""
+        votes = []
+        probs = []
+        for scorer in [self.momentum_model, self.mr_model, self.vol_model]:
+            if scorer and scorer.model is not None:
+                prob = scorer.predict_proba(features)
+                probs.append(prob)
+                votes.append(prob >= self.threshold)
+
+        avg_prob = np.mean(probs) if probs else 0.5
+        agree = sum(votes)
+        return agree >= self.min_agreement, float(avg_prob)

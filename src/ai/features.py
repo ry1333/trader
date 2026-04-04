@@ -141,6 +141,25 @@ AI_FEATURE_COLS = (
         "volume_spike", "volume_dry",
         "price_position_50", "pct_from_50_high", "pct_from_50_low",
         "is_first_hour", "is_last_hour",
-        "setup_quality",
+        # setup_quality removed — was double-counted (used in signals AND model.py post-hoc)
     ]
 )
+
+# Feature subsets for ensemble models
+MOMENTUM_FEATURES = [
+    "ret_1", "ret_3", "ret_6", "ret_12", "ew_mom",
+    "rsi_14", "macd", "macd_hist", "macd_signal",
+    "momentum_agreement", "momentum_accel",
+]
+
+MEAN_REVERSION_FEATURES = [
+    "zscore_20", "zscore_50", "rsi_14",
+    "price_position_50", "pct_from_50_high", "pct_from_50_low",
+    "vol_ratio",
+]
+
+VOLATILITY_FEATURES = [
+    "atr_14", "atr_50", "rvol_12", "rvol_50",
+    "vol_ratio_12_50", "vol_expanding", "vol_contracting",
+    "range_expansion", "atr_pct",
+]

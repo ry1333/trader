@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 from loguru import logger
 
-from src.ai.model import TradeScorer
+from src.ai.model import EnsembleScorer, TradeScorer
 from src.ai.trainer import train_and_save
 from src.backtest.engine import BacktestResult
 from src.backtest.engine_v2 import run_backtest_v2
@@ -146,7 +146,7 @@ def walk_forward(
             continue
 
         # ── Phase 2: Validate — sweep thresholds ──────────────────────
-        scorer = TradeScorer(model_path)
+        scorer = EnsembleScorer(model_path)
         best_thresh = 0.50
         best_score = float("-inf")
 

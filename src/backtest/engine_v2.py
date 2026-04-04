@@ -7,7 +7,7 @@ import pandas as pd
 from loguru import logger
 
 from src.ai.features import extract_ai_features
-from src.ai.model import TradeScorer
+from src.ai.model import EnsembleScorer, TradeScorer
 from src.backtest.engine import BacktestResult, Trade, _close_trade
 from src.config import BacktestConfig, RiskConfig, StrategyConfig
 from src.features.engine import compute_features
@@ -106,7 +106,7 @@ def run_backtest_v2(
     strategy_cfg: StrategyConfig,
     risk_cfg: RiskConfig,
     bt_cfg: BacktestConfig,
-    scorer: TradeScorer | None = None,
+    scorer: TradeScorer | EnsembleScorer | None = None,
     starting_balance: float = 50_000.0,
     collect_features: bool = False,
     training_mode: bool = False,

@@ -59,18 +59,23 @@ def generate_signals_v2(df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
         if regime == Regime.STRESS:
             continue
 
+        # Regime confidence gate: skip if ambiguous
+        regime_conf = df["regime_confidence"].iloc[i] if "regime_confidence" in df.columns else 1.0
+        if regime_conf < 0.55:
+            continue
+
         # No trading near close
         if df.get("near_close", pd.Series()).iloc[i] if "near_close" in df.columns else False:
             continue
 
-        # No new entries during midday chop (low edge)
-        if df.get("is_midday_chop", pd.Series()).iloc[i] if "is_midday_chop" in df.columns else False:
-            continue
+        # Midday chop: only block VWAP reversion (allow trend/ORB if confident)
+        is_midday = df.get("is_midday_chop", pd.Series()).iloc[i] if "is_midday_chop" in df.columns else False
 
         # Try each signal type in priority order
         sig, stype = _try_orb(df, i)
         if sig == Signal.FLAT:
-            sig, stype = _try_vwap_reversion(df, i)
+            if not is_midday:  # Only try VWAP reversion outside midday
+                sig, stype = _try_vwap_reversion(df, i)
         if sig == Signal.FLAT:
             sig, stype = _try_trend_continuation(df, i)
 
