@@ -217,7 +217,7 @@ def run_backtest_v2(
                         if scorer and scorer.model is not None:
                             should_take, win_prob = scorer.should_trade(ai_features)
                             # Minimum confidence floor
-                            if win_prob < 0.55:
+                            if win_prob < 0.50:
                                 should_take = False
 
                     if should_take:

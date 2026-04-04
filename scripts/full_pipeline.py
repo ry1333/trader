@@ -1,4 +1,4 @@
-"""Full pipeline v3: walk-forward retraining with per-window OOS reporting.
+"""Full pipeline v3: multi-instrument walk-forward with per-instrument models.
 
 Run:
     PYTHONPATH=. .venv/bin/python scripts/full_pipeline.py
@@ -14,95 +14,103 @@ import numpy as np
 import pandas as pd
 from loguru import logger
 
+from src.backtest.multi_instrument import load_instruments
 from src.backtest.walk_forward import aggregate_results, walk_forward
-from src.config import load_settings
+from src.config import BacktestConfig, load_settings
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data_cache"
 RESULTS_DIR = Path(__file__).resolve().parent.parent / "results"
 
-
-def load_data(instrument: str = "MES") -> pd.DataFrame:
-    """Load best available data for an instrument."""
-    file_map = {
-        "MES": ["es_5m_3y_databento.csv", "es_5m_12mo_databento.csv", "es_5m_60d.csv"],
-        "MNQ": ["nq_5m_2y_databento.csv"],
-        "MCL": ["cl_5m_2y_databento.csv"],
-    }
-    for fname in file_map.get(instrument, []):
-        path = DATA_DIR / fname
-        if path.exists():
-            logger.info(f"Loading {instrument} data from {fname}")
-            df = pd.read_csv(path)
-            df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
-            return df
-    raise FileNotFoundError(f"No data for {instrument}")
+INSTRUMENT_DATA = {
+    "MES": "es_5m_3y_databento.csv",
+    "MNQ": "nq_5m_2y_databento.csv",
+    # MCL removed — negative OOS, drags combined results
+}
 
 
 def main() -> None:
     settings = load_settings()
+    instruments = load_instruments()
+    inst_map = {i.symbol: i for i in instruments}
 
-    # Run walk-forward on ES (primary instrument)
-    instrument = "MES"
-    df = load_data(instrument)
-    logger.info(f"{instrument}: {len(df)} bars, {df.timestamp.iloc[0].date()} → {df.timestamp.iloc[-1].date()}")
+    all_summaries = {}
+    combined_pnl = 0.0
+    combined_trades = 0
+    combined_windows = 0
 
-    logger.info("Running walk-forward with rolling retraining...")
-    windows = walk_forward(
-        df,
-        settings.strategy,
-        settings.risk,
-        settings.backtest,
-        instrument=instrument,
-    )
+    for symbol, data_file in INSTRUMENT_DATA.items():
+        path = DATA_DIR / data_file
+        if not path.exists():
+            logger.warning(f"No data for {symbol}")
+            continue
 
-    summary = aggregate_results(windows)
+        inst = inst_map.get(symbol)
+        if not inst:
+            continue
+
+        df = pd.read_csv(path)
+        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+        logger.info(f"{symbol}: {len(df)} bars, {df.timestamp.iloc[0].date()} → {df.timestamp.iloc[-1].date()}")
+
+        # Instrument-specific backtest config
+        bt_cfg = BacktestConfig(
+            train_window_days=settings.backtest.train_window_days,
+            val_window_days=settings.backtest.val_window_days,
+            test_window_days=settings.backtest.test_window_days,
+            walk_forward_step_days=settings.backtest.walk_forward_step_days,
+            cost_per_side_per_contract=inst.cost_per_side,
+            slippage_ticks=1,
+            tick_size=inst.tick_size,
+            tick_value=inst.tick_value,
+        )
+
+        windows = walk_forward(
+            df, settings.strategy, settings.risk, bt_cfg,
+            instrument=symbol,
+        )
+        summary = aggregate_results(windows)
+        all_summaries[symbol] = summary
+
+        n_w = summary.get("windows", 0)
+        pnl = summary.get("total_pnl", 0)
+        combined_pnl += pnl
+        combined_trades += summary.get("total_trades", 0)
+        combined_windows = max(combined_windows, n_w)
+
+        logger.info(f"{symbol}: {summary.get('total_trades', 0)} trades, "
+                    f"${pnl:.2f}, WR={summary.get('win_rate', 0):.0%}")
 
     # Print results
     print("\n" + "=" * 80)
-    print("WALK-FORWARD RESULTS — TRUE OUT-OF-SAMPLE (per-window model retraining)")
+    print("MULTI-INSTRUMENT WALK-FORWARD — TRUE OOS (per-window retraining)")
     print("=" * 80)
 
-    if "per_window" in summary:
-        print(f"\n{'Win':>4} {'Test Period':<26} {'Tr':>4} {'Thr':>5} {'CV':>5} "
-              f"{'Trades':>6} {'PnL':>9} {'WR':>6} {'PF':>6} {'DD':>9} {'Deg':>4}")
-        print("-" * 90)
-        for w in summary["per_window"]:
-            deg = "!!" if w["degraded"] else ""
-            print(f"#{w['window']:>3} {w['test_period']:<26} {w['train_trades']:>4} "
-                  f"{w['threshold']:>5.2f} {w['cv_accuracy']:>5.3f} "
-                  f"{w['test_trades']:>6} ${w['test_pnl']:>8.0f} "
-                  f"{w['test_wr']:>5.0%} {w['test_pf']:>6.2f} "
-                  f"${w['test_dd']:>8.0f} {deg:>4}")
+    for sym, s in all_summaries.items():
+        n = s.get("windows", 0)
+        if n == 0:
+            continue
+        print(f"\n--- {sym} ---")
+        print(f"  Windows: {n}, Trades: {s.get('total_trades', 0)}")
+        print(f"  Total PnL: ${s.get('total_pnl', 0):.2f} (${s.get('total_pnl', 0) / n:.2f}/window)")
+        print(f"  Win rate: {s.get('win_rate', 0):.1%}, Sharpe: {s.get('sharpe', 0):.3f}")
+        print(f"  Max DD: ${s.get('max_drawdown', 0):.2f}, Degraded: {s.get('degraded_windows', 0)}")
+        if s.get("per_window"):
+            profitable = sum(1 for w in s["per_window"] if w["test_pnl"] > 0)
+            print(f"  Profitable windows: {profitable}/{n} ({profitable / n:.0%})")
 
-    print(f"\n--- AGGREGATE (OOS only) ---")
-    print(f"Windows: {summary.get('windows', 0)}")
-    print(f"Total trades: {summary.get('total_trades', 0)}")
-    print(f"Total PnL: ${summary.get('total_pnl', 0):.2f}")
-    print(f"Avg PnL/window: ${summary.get('avg_pnl_per_window', 0):.2f}")
-    print(f"Win rate: {summary.get('win_rate', 0):.1%}")
-    print(f"Max drawdown: ${summary.get('max_drawdown', 0):.2f}")
-    print(f"Sharpe: {summary.get('sharpe', 0):.3f}")
-    print(f"Degraded windows: {summary.get('degraded_windows', 0)}")
-
-    if summary.get("exit_reasons"):
-        print(f"\nExit reasons: {summary['exit_reasons']}")
-
-    # Topstep check
-    n_windows = summary.get("windows", 0)
-    if n_windows > 0:
-        monthly_avg = summary["total_pnl"] / n_windows
-        dd = abs(summary.get("max_drawdown", 0))
-        print(f"\n--- TOPSTEP READINESS ---")
-        print(f"Avg monthly PnL: ${monthly_avg:.2f} ({monthly_avg / 50000 * 100:.1f}%)")
-        print(f"Max drawdown: ${dd:.2f} (limit $2,000)")
-        print(f"Target: $5,000/month (10%)")
+    print(f"\n{'=' * 80}")
+    print(f"COMBINED: {combined_trades} trades, ${combined_pnl:.2f}")
+    if combined_windows > 0:
+        print(f"Monthly avg: ${combined_pnl / combined_windows:.2f} ({combined_pnl / combined_windows / 50000 * 100:.1f}%)")
+    print(f"Target: $5,000/month (10%)")
 
     # Save
     RESULTS_DIR.mkdir(exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    with open(RESULTS_DIR / f"wf_v3_{ts}.json", "w") as f:
-        json.dump(summary, f, indent=2, default=str)
-    logger.info(f"Results saved to results/wf_v3_{ts}.json")
+    with open(RESULTS_DIR / f"multi_wf_{ts}.json", "w") as f:
+        json.dump({"instruments": {k: v for k, v in all_summaries.items()},
+                    "combined_pnl": combined_pnl, "combined_trades": combined_trades},
+                   f, indent=2, default=str)
 
 
 if __name__ == "__main__":

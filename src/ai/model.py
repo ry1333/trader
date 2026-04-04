@@ -139,15 +139,11 @@ class EnsembleScorer:
         return np.mean(probs) if probs else 0.5
 
     def should_trade(self, features: dict) -> tuple[bool, float]:
-        """2-of-3 voting with average probability."""
-        votes = []
+        """Average probability across models — take if avg exceeds threshold."""
         probs = []
         for scorer in [self.momentum_model, self.mr_model, self.vol_model]:
             if scorer and scorer.model is not None:
-                prob = scorer.predict_proba(features)
-                probs.append(prob)
-                votes.append(prob >= self.threshold)
+                probs.append(scorer.predict_proba(features))
 
-        avg_prob = np.mean(probs) if probs else 0.5
-        agree = sum(votes)
-        return agree >= self.min_agreement, float(avg_prob)
+        avg_prob = float(np.mean(probs)) if probs else 0.5
+        return avg_prob >= self.threshold, avg_prob
