@@ -12,15 +12,15 @@ user_hub = "https://gateway-rtc-demo.s2f.projectx.com/hubs/user"
 [strategy]
 instrument = "MES"          # Micro E-mini S&P 500 (1/10th ES size)
 bar_interval_minutes = 5
-max_trades_per_day = 8
-max_hold_bars = 24          # 120 minutes max hold
+max_trades_per_day = 10
+max_hold_bars = 48          # 240 minutes (4 hours) — let winners run
 
 [risk]
 # Topstep $50K account rules
 max_daily_loss = 2000.0
 max_total_loss = 2000.0     # Maximum Loss Limit
-max_position_size = 3       # MES contracts — limit single trade damage
-risk_per_trade_pct = 0.20   # of account balance
+max_position_size = 5       # Default max contracts per trade
+risk_per_trade_pct = 0.35   # of account balance
 flatten_time_ct = "15:00"   # 3:00 PM CT (10 min buffer before 3:10)
 session_start_ct = "17:00"  # 5:00 PM CT previous day
 consistency_target = 0.50   # best day < 50% of profit target

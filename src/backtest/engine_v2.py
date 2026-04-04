@@ -26,7 +26,7 @@ def _check_exit_v2(
     bt_cfg: BacktestConfig,
     signal_type: int,
 ) -> tuple[float | None, str]:
-    """V2 exit logic — tighter for ORB, wider for trend continuation."""
+    """V2 exit logic with trailing stop to let winners run."""
 
     # Forced flatten before session close
     if ct_minutes >= 900:
@@ -37,9 +37,11 @@ def _check_exit_v2(
     if bars_held >= strategy_cfg.max_hold_bars:
         return row["close"], "max_hold"
 
-    # Stress regime: exit
+    # Stress regime: only exit if trade is losing
     if row.get("regime") == 0:
-        return row["close"], "stress_exit"
+        current_pnl = (row["close"] - trade.entry_price) * trade.direction
+        if current_pnl < 0:
+            return row["close"], "stress_exit"
 
     # Standard SL/TP
     if trade.direction == 1:
@@ -53,14 +55,36 @@ def _check_exit_v2(
         if row["low"] <= trade.tp_price:
             return trade.tp_price + (bt_cfg.slippage_ticks * bt_cfg.tick_size), "take_profit"
 
-    # VWAP reversion: exit when price returns to VWAP
+    # ── Trailing stop: lock in profits ────────────────────────────────
+    # Track max favorable excursion
+    if trade.direction == 1:
+        current_profit = row["high"] - trade.entry_price
+    else:
+        current_profit = trade.entry_price - row["low"]
+
+    if current_profit > trade.peak_profit:
+        trade.peak_profit = current_profit
+
+    # Once profit exceeds 50% of target, trail at 40% of peak
+    stop_distance = abs(trade.entry_price - trade.sl_price)
+    target_distance = abs(trade.tp_price - trade.entry_price)
+    if trade.peak_profit > target_distance * 0.50:
+        trail_level = trade.peak_profit * 0.60  # Keep 60% of peak profit
+        current_pnl = (row["close"] - trade.entry_price) * trade.direction
+        if current_pnl < trail_level * 0.40:
+            # Profit has pulled back more than 60% from peak — trail out
+            return row["close"], "trailing_stop"
+
+    # VWAP reversion: exit when price returns to VWAP (but only if profitable)
     if signal_type == SignalType.VWAP_REVERSION:
         vwap = row.get("vwap", None)
         if vwap is not None and not pd.isna(vwap):
-            if trade.direction == 1 and row["close"] >= vwap:
-                return row["close"], "vwap_target"
-            if trade.direction == -1 and row["close"] <= vwap:
-                return row["close"], "vwap_target"
+            current_pnl = (row["close"] - trade.entry_price) * trade.direction
+            if current_pnl > 0:
+                if trade.direction == 1 and row["close"] >= vwap:
+                    return row["close"], "vwap_target"
+                if trade.direction == -1 and row["close"] <= vwap:
+                    return row["close"], "vwap_target"
 
     return None, ""
 

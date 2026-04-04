@@ -35,6 +35,7 @@ class Trade:
     pnl: float = 0.0
     fees: float = 0.0
     exit_reason: str = ""
+    peak_profit: float = 0.0  # Track max favorable excursion for trailing stop
 
 
 @dataclass

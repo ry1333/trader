@@ -1,0 +1,26 @@
+# Multi-instrument configuration
+# Each instrument has its own tick specs and risk params
+
+[MES]
+name = "Micro E-mini S&P 500"
+tick_size = 0.25
+tick_value = 1.25
+cost_per_side = 0.62
+max_position = 5
+data_file = "es_5m_3y_databento.csv"
+
+[MNQ]
+name = "Micro E-mini Nasdaq 100"
+tick_size = 0.25
+tick_value = 0.50
+cost_per_side = 0.62
+max_position = 10
+data_file = "nq_5m_2y_databento.csv"
+
+[MCL]
+name = "Micro WTI Crude Oil"
+tick_size = 0.01
+tick_value = 1.00
+cost_per_side = 0.62
+max_position = 5
+data_file = "cl_5m_2y_databento.csv"
