@@ -99,7 +99,7 @@ class RiskEngine:
         size = int(risk_budget / risk_per_contract)
         return max(1, min(size, self.cfg.max_position_size))
 
-    def compute_stop_ticks(self, atr: float, tick_size: float, multiplier: float = 1.5) -> int:
+    def compute_stop_ticks(self, atr: float, tick_size: float, multiplier: float = 2.0) -> int:
         """Compute stop-loss distance in ticks based on ATR."""
         if atr <= 0 or tick_size <= 0:
             return 8  # fallback: 8 ticks = 2 points ES

@@ -12,7 +12,7 @@ user_hub = "https://gateway-rtc-demo.s2f.projectx.com/hubs/user"
 [strategy]
 instrument = "ES"           # E-mini S&P 500
 bar_interval_minutes = 5
-max_trades_per_day = 6
+max_trades_per_day = 8
 max_hold_bars = 24          # 120 minutes max hold
 
 [risk]
