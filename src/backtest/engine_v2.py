@@ -244,6 +244,10 @@ def run_backtest_v2(
                             sl_mult, rr_ratio = 2.0, 2.0
 
                         size = risk.compute_position_size(atr, bt_cfg.tick_size, bt_cfg.tick_value)
+                        # EV-based sizing: scale position by prediction confidence
+                        if hasattr(scorer, 'get_size_multiplier'):
+                            ev_mult = scorer.get_size_multiplier()
+                            size = max(1, int(size * ev_mult))
                         sl_ticks = risk.compute_stop_ticks(atr, bt_cfg.tick_size, sl_mult)
                         tp_ticks = risk.compute_target_ticks(sl_ticks, rr_ratio)
 

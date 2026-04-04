@@ -69,13 +69,30 @@ class EVScorer:
         """Interface compatible with TradeScorer/EnsembleScorer.
 
         Returns (should_take, probability_proxy).
-        Probability proxy = normalized EV score (0-1 range for compatibility).
+        Also stores last_ev for position sizing.
         """
         ev = self.predict_ev(features)
-        # Convert EV to 0-1 probability-like score for compatibility
-        # Sigmoid-ish mapping: EV of $50 → ~0.62, EV of $0 → 0.50, EV of -$50 → ~0.38
+        self.last_ev = ev  # Store for EV-based sizing
         prob_proxy = 1.0 / (1.0 + np.exp(-ev / 50.0))
         return ev > self.ev_threshold, float(prob_proxy)
+
+    def get_size_multiplier(self) -> float:
+        """Return position size multiplier based on last predicted EV.
+
+        Top decile EV: 1.5x size
+        High EV: 1.2x
+        Medium EV: 1.0x
+        Low accepted: 0.7x
+        """
+        ev = getattr(self, "last_ev", 0.0)
+        if ev > 150:
+            return 1.5
+        elif ev > 80:
+            return 1.2
+        elif ev > 40:
+            return 1.0
+        else:
+            return 0.7
 
 
 def train_ev_model(

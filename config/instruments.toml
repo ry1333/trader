@@ -1,5 +1,5 @@
-# Multi-instrument configuration
-# Focus on instruments with proven OOS edge
+# Multi-instrument portfolio
+# Focus on instruments with proven or potential OOS edge
 
 [MNQ]
 name = "Micro E-mini Nasdaq 100"
@@ -9,14 +9,6 @@ cost_per_side = 0.62
 max_position = 10
 data_file = "nq_5m_2y_databento.csv"
 
-[M2K]
-name = "Micro E-mini Russell 2000"
-tick_size = 0.10
-tick_value = 0.50
-cost_per_side = 0.62
-max_position = 10
-data_file = "rty_5m_2y_databento.csv"
-
 [MGC]
 name = "Micro Gold"
 tick_size = 0.10
@@ -25,10 +17,18 @@ cost_per_side = 0.62
 max_position = 5
 data_file = "gc_5m_2y_databento.csv"
 
-[MES]
-name = "Micro E-mini S&P 500"
-tick_size = 0.25
-tick_value = 1.25
+[MYM]
+name = "Micro E-mini Dow Jones"
+tick_size = 1.00
+tick_value = 0.50
+cost_per_side = 0.62
+max_position = 10
+data_file = "ym_5m_2y_databento.csv"
+
+[MCL]
+name = "Micro WTI Crude Oil"
+tick_size = 0.01
+tick_value = 1.00
 cost_per_side = 0.62
 max_position = 5
-data_file = "es_5m_3y_databento.csv"
+data_file = "cl_5m_2y_databento.csv"

@@ -145,28 +145,32 @@ def walk_forward(
             cursor += pd.Timedelta(days=step_days)
             continue
 
-        # ── Phase 2: Validate — sweep thresholds ──────────────────────
+        # ── Phase 2: Validate — sweep EV thresholds ─────────────────
         scorer = EVScorer(ev_path)
         best_thresh = 0.50
+        best_ev_thresh = 0.0
         best_score = float("-inf")
 
-        for thresh in np.arange(0.40, 0.65, 0.05):
-            scorer.threshold = thresh
+        # Sweep EV thresholds (dollar values, not probabilities)
+        for ev_thresh in [-10, 0, 10, 20, 30, 50]:
+            scorer.ev_threshold = ev_thresh
             val_result, _ = run_backtest_v2(
                 val_df, strategy_cfg, risk_cfg, bt_cfg, scorer=scorer,
             )
             pnl = val_result.net_pnl
             killed = val_result.risk_summary.get("is_killed", False)
-            # Score: PnL + survival bonus + PF bonus
             pf = val_result.profit_factor
+            n_trades = len(val_result.trades)
+            # Score: PnL + survival bonus + PF bonus + min trade bonus
             score = pnl + (300 if not killed else 0) + (pf * 100 if pf > 1.0 else 0)
+            score += min(n_trades * 5, 100)  # Bonus for having trades (up to 100)
 
             if score > best_score:
                 best_score = score
-                best_thresh = thresh
+                best_ev_thresh = ev_thresh
 
-        window.best_threshold = best_thresh
-        scorer.threshold = best_thresh
+        scorer.ev_threshold = best_ev_thresh
+        window.best_threshold = best_ev_thresh
 
         # Run validation with best threshold for reporting
         val_result, _ = run_backtest_v2(
