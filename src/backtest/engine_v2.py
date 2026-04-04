@@ -14,7 +14,7 @@ from src.features.engine import compute_features
 from src.features.session import add_session_features
 from src.risk.engine import RiskEngine
 from src.strategy.regime import add_regime
-from src.strategy.signals_v2 import Signal, SignalType, generate_signals_v2
+from src.strategy.signals_v3 import Signal, SignalType, generate_signals_v3
 
 
 def _check_exit_v2(
@@ -123,7 +123,7 @@ def run_backtest_v2(
     df = compute_features(df)
     df = add_session_features(df)
     df = add_regime(df)
-    df["signal"], df["signal_type"] = generate_signals_v2(df)
+    df["signal"], df["signal_type"] = generate_signals_v3(df)
 
     risk = risk_engine if risk_engine is not None else RiskEngine(risk_cfg, starting_balance)
     trades: list[Trade] = []
@@ -226,8 +226,20 @@ def run_backtest_v2(
                             sl_mult, rr_ratio = 2.5, 2.0
                         elif sig_type == SignalType.VWAP_REVERSION:
                             sl_mult, rr_ratio = 2.0, 1.5
-                        else:  # TREND_CONTINUATION
+                        elif sig_type == SignalType.TREND_CONTINUATION:
                             sl_mult, rr_ratio = 2.5, 3.0
+                        elif sig_type == SignalType.EMA_PULLBACK:
+                            sl_mult, rr_ratio = 1.5, 2.0  # Tight stop near EMA
+                        elif sig_type == SignalType.RANGE_BREAKOUT:
+                            sl_mult, rr_ratio = 2.0, 2.5
+                        elif sig_type == SignalType.MOMENTUM_IGNITION:
+                            sl_mult, rr_ratio = 2.0, 2.0  # Quick in/out
+                        elif sig_type == SignalType.VOL_CONTRACTION:
+                            sl_mult, rr_ratio = 2.0, 3.0  # Squeeze = big moves
+                        elif sig_type == SignalType.RSI_REVERSAL:
+                            sl_mult, rr_ratio = 1.5, 2.0
+                        else:  # PREV_DAY_LEVEL, SESSION_LEVEL, etc.
+                            sl_mult, rr_ratio = 2.0, 2.0
 
                         size = risk.compute_position_size(atr, bt_cfg.tick_size, bt_cfg.tick_value)
                         sl_ticks = risk.compute_stop_ticks(atr, bt_cfg.tick_size, sl_mult)
