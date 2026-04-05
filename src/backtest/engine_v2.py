@@ -40,21 +40,29 @@ def _check_exit_v2(
     if ct_minutes >= 900:
         return row["close"], "session_flatten"
 
-    # ── Stress regime: exit after 6 bars always, or immediately if losing
+    # ── Stress regime: only exit if losing more than 0.5 ATR or held too long
+    # Audit: 22 stress exits at -$53 avg. Was too aggressive — 27% were winners.
     if row.get("regime") == 0:
-        if bars_held > 6:
+        if bars_held > 10:  # Extended stress exposure
             return row["close"], "stress_exit"
-        if current_pnl < 0:
+        if current_pnl < -atr * 0.5:  # Only if meaningfully losing
             return row["close"], "stress_exit"
 
-    # ── Time-decay exit: if significantly losing after 24 bars (2 hours), cut
-    # Audit: 106 time_decay exits at -$6,660. Loosened from 18 to 24 bars.
-    if bars_held >= 24 and current_pnl < -atr * 0.5:
+    # ── Time-decay exit: only if significantly losing after 30 bars
+    # Audit: 62 time_decay exits at -$6,106. Loosened further — winners avg 25 bars.
+    if bars_held >= 30 and current_pnl < -atr:
         return row["close"], "time_decay"
 
-    # ── Max hold time ─────────────────────────────────────────────────
+    # ── Max hold time — but not if winning big
     if bars_held >= strategy_cfg.max_hold_bars:
-        return row["close"], "max_hold"
+        # Audit: max_hold was +$8,720 (98% WR) — these are winners being cut!
+        # Let strong winners run: only force exit if not profitable
+        if current_pnl <= 0:
+            return row["close"], "max_hold"
+        # If profitable but at max hold, trail tightly instead
+        if current_pnl > 0 and trade.peak_profit > 0:
+            if current_pnl < trade.peak_profit * 0.40:
+                return row["close"], "max_hold_trail"
 
     # ── Standard SL/TP ────────────────────────────────────────────────
     if trade.direction == 1:
@@ -83,11 +91,12 @@ def _check_exit_v2(
     # The stop was triggering on noise pullbacks, not real reversals
     # Replaced by trailing stop which is more adaptive
 
-    # ── Trailing stop: activate at 75% of target, keep 50% of peak ───
-    if target_distance > 0 and trade.peak_profit > target_distance * 0.75:
-        trail_level = trade.peak_profit * 0.50  # Keep 50% of peak profit
-        if current_pnl < trail_level * 0.50:
-            # Profit pulled back >50% from trail level
+    # ── Trailing stop: activate at 60% of target, keep 40% of peak ────
+    # Audit: 17 trailing exits at $44 avg — too tight, missing bigger moves.
+    # Loosened: activate earlier but trail wider to capture more profit.
+    if target_distance > 0 and trade.peak_profit > target_distance * 0.60:
+        trail_keep = trade.peak_profit * 0.40  # Keep 40% of peak
+        if current_pnl < trail_keep:
             return row["close"], "trailing_stop"
 
     # ── VWAP reversion: exit near VWAP band (±0.5 ATR) if profitable ─

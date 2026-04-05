@@ -117,32 +117,36 @@ class QualityRiskScorer:
         return True, float(prob_proxy)
 
     def get_size_multiplier(self) -> float:
-        """Dynamic sizing based on last prediction."""
+        """Dynamic sizing — driven primarily by skip probability (most reliable signal).
+
+        Skip model (71% accuracy) is the strongest predictor.
+        EV model (R²=-0.13) is weak, used only for extreme cases.
+        """
+        skip = getattr(self, "_last_skip", 0.3)
         ev = getattr(self, "_last_ev", 0)
         risk = getattr(self, "_last_risk", 50)
-        skip = getattr(self, "_last_skip", 0.3)
 
-        # Base multiplier from EV
-        if ev > 100:
-            base = 1.5
-        elif ev > 50:
-            base = 1.2
-        elif ev > 20:
-            base = 1.0
+        # Base from skip probability (low skip = high quality)
+        if skip < 0.15:
+            base = 1.5  # Very unlikely to be a large loser
+        elif skip < 0.25:
+            base = 1.3
+        elif skip < 0.35:
+            base = 1.1
         else:
-            base = 0.7
+            base = 0.8  # Higher chance of large loss
 
-        # Risk discount
-        if risk > 100:
-            base *= 0.6  # High expected adverse excursion
-        elif risk > 75:
-            base *= 0.8
+        # EV boost only for very strong predictions
+        if ev > 80:
+            base *= 1.15
+        elif ev < -30:
+            base *= 0.85
 
-        # Uncertainty discount
-        if skip > 0.35:
-            base *= 0.7
+        # Risk discount for high adverse excursion
+        if risk > 120:
+            base *= 0.75
 
-        return max(0.5, min(1.5, base))
+        return max(0.6, min(1.6, base))
 
     def should_trade(self, features: dict) -> tuple[bool, float]:
         """Full 3-part decision with caching for sizing."""
