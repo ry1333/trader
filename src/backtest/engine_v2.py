@@ -257,7 +257,7 @@ def run_backtest_v2(
 
                     if scorer or collect_features:
                         ai_features = extract_ai_features(df, i)
-                        if scorer and scorer.model is not None:
+                        if scorer and scorer.model is not None and not training_mode:
                             # Per-strategy scoring if StrategyModelBank
                             if isinstance(scorer, StrategyModelBank):
                                 strategy_name = SignalType(sig_type).name
@@ -325,7 +325,28 @@ def run_backtest_v2(
                         # Meta-gate sizing (HTF regime)
                         size = max(1, int(size * meta_mult))
 
-                        # Final trade filter: rolling performance + composite score
+                        # Final trade filter (skip during training — need all trades for data)
+                        if training_mode:
+                            sl_ticks = risk.compute_stop_ticks(atr, bt_cfg.tick_size, sl_mult)
+                            tp_ticks = risk.compute_target_ticks(sl_ticks, rr_ratio)
+                            direction = 1 if row["signal"] == Signal.LONG else -1
+                            entry_price = row["close"] + (bt_cfg.slippage_ticks * bt_cfg.tick_size * direction)
+                            sl_price = entry_price - (sl_ticks * bt_cfg.tick_size * direction)
+                            tp_price = entry_price + (tp_ticks * bt_cfg.tick_size * direction)
+                            active_trade = Trade(
+                                entry_bar=i, entry_price=entry_price, direction=direction,
+                                size=size, sl_price=sl_price, tp_price=tp_price,
+                            )
+                            active_signal_type = sig_type
+                            if collect_features:
+                                feature_records.append({
+                                    "entry_bar": i, "signal": int(row["signal"]),
+                                    "signal_type": int(row["signal_type"]),
+                                    "ai_approved": True, "win_prob": 0.5, **ai_features,
+                                })
+                            equity_curve.append(equity)
+                            continue
+
                         # Reuse htf_features from meta-gate if already computed
                         if htf_features is None:
                             htf_features = compute_htf_regime_features(df, i)
