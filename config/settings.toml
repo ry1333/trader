@@ -16,12 +16,12 @@ max_trades_per_day = 10
 max_hold_bars = 48
 
 [risk]
-# Topstep $50K account — sized for $3K/month target
+# Topstep $50K — proven config (Sharpe 1.77 on MNQ)
 max_daily_loss = 2000.0
 max_total_loss = 2000.0
-max_position_size = 8       # Increased from 5 — meta-gate protects downside
-risk_per_trade_pct = 0.50   # Increased from 0.40 — backed by Sharpe >1.0
-max_risk_per_trade = 250.0  # Increased from 200 — more room for MNQ sizing
+max_position_size = 5
+risk_per_trade_pct = 0.40
+max_risk_per_trade = 200.0
 daily_loss_tier1 = 500.0
 daily_loss_tier2 = 1000.0
 weekly_loss_limit = 1500.0
