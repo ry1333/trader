@@ -28,7 +28,7 @@ def _check_exit_v2(
     bt_cfg: BacktestConfig,
     signal_type: int,
 ) -> tuple[float | None, str]:
-    """V3 exit logic — trailing stop, breakeven, time-decay, improved stress."""
+    """Exit logic — proven configuration from Sharpe 1.77 run."""
 
     bars_held = bar_idx - trade.entry_bar
     current_pnl = (row["close"] - trade.entry_price) * trade.direction
@@ -40,26 +40,21 @@ def _check_exit_v2(
     if ct_minutes >= 900:
         return row["close"], "session_flatten"
 
-    # ── Stress regime: only exit if losing more than 0.5 ATR or held too long
-    # Audit: 22 stress exits at -$53 avg. Was too aggressive — 27% were winners.
+    # ── Stress regime: exit if losing or held >10 bars ────────────────
     if row.get("regime") == 0:
-        if bars_held > 10:  # Extended stress exposure
+        if bars_held > 10:
             return row["close"], "stress_exit"
-        if current_pnl < -atr * 0.5:  # Only if meaningfully losing
+        if current_pnl < -atr * 0.5:
             return row["close"], "stress_exit"
 
-    # ── Time-decay exit: only if significantly losing after 30 bars
-    # Audit: 62 time_decay exits at -$6,106. Loosened further — winners avg 25 bars.
+    # ── Time-decay: only if significantly losing after 30 bars ────────
     if bars_held >= 30 and current_pnl < -atr:
         return row["close"], "time_decay"
 
-    # ── Max hold time — but not if winning big
+    # ── Max hold — let winners run ────────────────────────────────────
     if bars_held >= strategy_cfg.max_hold_bars:
-        # Audit: max_hold was +$8,720 (98% WR) — these are winners being cut!
-        # Let strong winners run: only force exit if not profitable
         if current_pnl <= 0:
             return row["close"], "max_hold"
-        # If profitable but at max hold, trail tightly instead
         if current_pnl > 0 and trade.peak_profit > 0:
             if current_pnl < trade.peak_profit * 0.40:
                 return row["close"], "max_hold_trail"
@@ -76,31 +71,26 @@ def _check_exit_v2(
         if row["low"] <= trade.tp_price:
             return trade.tp_price + (bt_cfg.slippage_ticks * bt_cfg.tick_size), "take_profit"
 
-    # ── Track peak profit for trailing stop ───────────────────────────
+    # ── Track peak profit ─────────────────────────────────────────────
     if trade.direction == 1:
         bar_max_profit = row["high"] - trade.entry_price
     else:
         bar_max_profit = trade.entry_price - row["low"]
-
     if bar_max_profit > trade.peak_profit:
         trade.peak_profit = bar_max_profit
 
     target_distance = abs(trade.tp_price - trade.entry_price)
 
-    # ── Breakeven stop: DISABLED — audit showed 144 trades, -$5,419, 0% WR
-    # The stop was triggering on noise pullbacks, not real reversals
-    # Replaced by trailing stop which is more adaptive
-
-    # ── Trailing stop: activate at 60% of target, keep 40% of peak ────
-    # Audit: 17 trailing exits at $44 avg — too tight, missing bigger moves.
-    # Loosened: activate earlier but trail wider to capture more profit.
+    # ── Trailing stop: activate at 60% of target, keep 40% of peak ───
     if target_distance > 0 and trade.peak_profit > target_distance * 0.60:
-        trail_keep = trade.peak_profit * 0.40  # Keep 40% of peak
+        trail_keep = trade.peak_profit * 0.40
         if current_pnl < trail_keep:
             return row["close"], "trailing_stop"
 
-    # ── VWAP reversion: exit near VWAP band (±0.5 ATR) if profitable ─
-    if signal_type == SignalType.VWAP_REVERSION:
+    # ── VWAP target for reversion trades ──────────────────────────────
+    REVERSION_TYPES = {SignalType.VWAP_REVERSION, SignalType.VWAP_RECLAIM,
+                       SignalType.FAILED_BREAKOUT, SignalType.RSI_REVERSAL}
+    if signal_type in REVERSION_TYPES:
         vwap = row.get("vwap", None)
         if vwap is not None and not pd.isna(vwap) and atr > 0 and current_pnl > 0:
             vwap_band = 0.5 * atr
