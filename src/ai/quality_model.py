@@ -221,8 +221,8 @@ def train_quality_risk_model(
     logger.info(f"  Risk model: R²={risk_r2:.4f}")
 
     # ── Model 3: Skip classifier (large loser = 1, else = 0) ─────────
-    # Define "large loser" as bottom 30th percentile (was 25th — catch more bad trades)
-    large_loss_threshold = np.percentile(y_pnl, 30)
+    # Define "large loser" as bottom 25th percentile
+    large_loss_threshold = np.percentile(y_pnl, 25)
     y_skip = (y_pnl < large_loss_threshold).astype(int)
 
     skip_model = GradientBoostingClassifier(

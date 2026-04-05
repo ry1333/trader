@@ -10,6 +10,7 @@ from src.ai.features import extract_ai_features
 from src.ai.ev_model import EVScorer
 from src.ai.model import EnsembleScorer, TradeScorer
 from src.ai.quality_model import QualityRiskScorer
+from src.filters.session_quality import SessionGrade, compute_session_quality
 from src.backtest.engine import BacktestResult, Trade, _close_trade
 from src.config import BacktestConfig, RiskConfig, StrategyConfig
 from src.features.engine import compute_features
@@ -205,6 +206,13 @@ def run_backtest_v2(
                     equity_curve.append(equity)
                     continue
 
+                # Session quality filter: skip chop + news + grade-based sizing
+                session = compute_session_quality(df, i)
+                if session.grade == SessionGrade.D:
+                    equity_curve.append(equity)
+                    continue  # No trading: extreme chop or news volatility
+                session_size_mult = session.size_multiplier
+
                 # Volatility spike gate: skip extreme vol days
                 vol_gated = not pd.isna(atr_50) and atr_50 > 0 and atr > atr_50 * 2.0
 
@@ -220,6 +228,9 @@ def run_backtest_v2(
                             should_take, win_prob = scorer.should_trade(ai_features)
                             # Minimum confidence floor
                             if win_prob < 0.50:
+                                should_take = False
+                            # C-grade sessions: require higher confidence
+                            if session.grade == SessionGrade.C and win_prob < 0.58:
                                 should_take = False
 
                     if should_take:
@@ -248,10 +259,12 @@ def run_backtest_v2(
                             sl_mult, rr_ratio = 2.0, 2.0
 
                         size = risk.compute_position_size(atr, bt_cfg.tick_size, bt_cfg.tick_value)
-                        # EV-based sizing: scale position by prediction confidence
+                        # EV-based sizing: scale by prediction confidence
                         if hasattr(scorer, 'get_size_multiplier'):
                             ev_mult = scorer.get_size_multiplier()
                             size = max(1, int(size * ev_mult))
+                        # Session quality sizing: A-day boost, C-day reduce
+                        size = max(1, int(size * session_size_mult))
                         sl_ticks = risk.compute_stop_ticks(atr, bt_cfg.tick_size, sl_mult)
                         tp_ticks = risk.compute_target_ticks(sl_ticks, rr_ratio)
 
