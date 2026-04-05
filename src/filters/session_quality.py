@@ -1,8 +1,9 @@
-"""Session quality filter — classifies trading days and manages no-trade zones.
+"""Session quality filter — classifies trading conditions and manages no-trade zones.
 
-Two layers:
-1. News calendar filter — deterministic no-trade windows around scheduled macro events
-2. Session quality model — real-time assessment of market conditions using first 30-60 min
+Three layers:
+1. Real news calendar — actual scheduled macro event dates from ForexFactory/historical
+2. Volatility-based news detection — catches unscheduled events from price action
+3. Session quality model — real-time chop/trend assessment
 
 Output: SessionGrade (A/B/C/D) that controls sizing and trade permission.
 """
@@ -14,6 +15,17 @@ from enum import IntEnum
 
 import numpy as np
 import pandas as pd
+
+# Lazy import to avoid circular deps
+_news_filter = None
+
+
+def _get_news_filter():
+    global _news_filter
+    if _news_filter is None:
+        from src.filters.news_calendar import NewsFilter
+        _news_filter = NewsFilter()
+    return _news_filter
 
 
 class SessionGrade(IntEnum):
@@ -208,11 +220,26 @@ def compute_session_quality(df: pd.DataFrame, bar_idx: int, lookback: int = 30) 
     if chop_count > 0:
         assessment.chop_score = chop_signals / chop_count
 
-    # ── Check for news-like volatility ────────────────────────────────
-    assessment.is_news_blocked = is_likely_news_period(df, bar_idx)
+    # ── Check for scheduled news events (real calendar) ─────────────
+    timestamp = df["timestamp"].iloc[bar_idx]
+    nf = _get_news_filter()
+    news_blocked, news_event = nf.is_blocked(timestamp)
+    news_impact = nf.get_impact_at(timestamp)
+
+    # Also check volatility-based detection for unscheduled events
+    vol_news = is_likely_news_period(df, bar_idx)
+    assessment.is_news_blocked = news_blocked or vol_news
 
     # ── Assign Grade ──────────────────────────────────────────────────
-    if assessment.is_news_blocked:
+    if news_blocked and news_impact >= 3:
+        assessment.grade = SessionGrade.D
+        assessment.size_multiplier = 0.0
+        assessment.reason = f"high_impact_news:{news_event}"
+    elif news_blocked and news_impact >= 2:
+        assessment.grade = SessionGrade.C
+        assessment.size_multiplier = 0.5
+        assessment.reason = f"medium_impact_news:{news_event}"
+    elif assessment.is_news_blocked:
         assessment.grade = SessionGrade.D
         assessment.size_multiplier = 0.0
         assessment.reason = "news_volatility"
