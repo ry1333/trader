@@ -141,7 +141,11 @@ AI_FEATURE_COLS = (
         "volume_spike", "volume_dry",
         "price_position_50", "pct_from_50_high", "pct_from_50_low",
         "is_first_hour", "is_last_hour",
-        # setup_quality removed — was double-counted (used in signals AND model.py post-hoc)
+        # setup_quality removed — was double-counted
+    # Intra-bar features (from 1-min data)
+    "ib_trend_consistency", "ib_vol_front_pct", "ib_micro_vol",
+    "ib_upper_wick", "ib_lower_wick", "ib_body_pct",
+    "ib_momentum_accel", "ib_conviction",
     ]
 )
 

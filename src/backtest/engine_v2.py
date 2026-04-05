@@ -15,6 +15,7 @@ from src.ai.quality_model import QualityRiskScorer
 from src.ai.strategy_bank import StrategyModelBank
 from src.filters.market_bias import MarketBias, compute_market_bias, get_direction_filter
 from src.filters.session_quality import SessionGrade, compute_session_quality
+from src.filters.trade_filter import TradeFilter
 from src.backtest.engine import BacktestResult, Trade, _close_trade
 from src.config import BacktestConfig, RiskConfig, StrategyConfig
 from src.features.engine import compute_features
@@ -160,6 +161,9 @@ def run_backtest_v2(
     # Signal-type consecutive loss tracking for circuit breaker
     signal_type_losses: dict[int, int] = {}
 
+    # Hard quantitative trade filter with rolling performance
+    trade_filter = TradeFilter()
+
     for i in range(len(df)):
         row = df.iloc[i]
         ts = row["timestamp"]
@@ -191,8 +195,11 @@ def run_backtest_v2(
                 trades.append(active_trade)
                 equity = risk.state.current_balance
 
-                # Track signal-type losses for circuit breaker
+                # Record for trade filter + circuit breaker
                 net_pnl = active_trade.pnl - active_trade.fees
+                trade_filter.record_trade(
+                    SignalType(active_signal_type).name if active_signal_type else "UNKNOWN",
+                    active_trade.direction, net_pnl)
                 if net_pnl <= 0:
                     signal_type_losses[active_signal_type] = signal_type_losses.get(active_signal_type, 0) + 1
                 else:
@@ -325,10 +332,35 @@ def run_backtest_v2(
                             size = max(1, int(size * ev_mult))
                         # Session quality sizing: A-day boost, C-day reduce
                         size = max(1, int(size * session_size_mult))
-                        # Market bias sizing: boost with-trend, reduce counter-trend
+                        # Market bias sizing
                         size = max(1, int(size * bias_size_mult))
-                        # Meta-gate sizing: HTF regime adjustment
+                        # Meta-gate sizing
                         size = max(1, int(size * meta_mult))
+
+                        # Final trade filter: rolling performance + composite score
+                        htf_features = compute_htf_regime_features(df, i)
+                        dd_pct = abs(risk.state.total_pnl) / risk.cfg.max_total_loss if risk.cfg.max_total_loss > 0 and risk.state.total_pnl < 0 else 0
+                        vol_regime = row.get("atr_14", 0) / row.get("atr_50", 1) if not pd.isna(row.get("atr_50", None)) and row.get("atr_50", 0) > 0 else 1.0
+                        tf_action, tf_mult = trade_filter.evaluate(
+                            strategy=SignalType(sig_type).name,
+                            direction=direction,
+                            ai_confidence=win_prob,
+                            htf_bearish_count=htf_features.get("htf_bearish_count", 0),
+                            htf_bullish_count=htf_features.get("htf_bullish_count", 0),
+                            session_grade=int(session.grade),
+                            vol_regime=vol_regime,
+                            current_drawdown_pct=dd_pct,
+                        )
+                        if tf_action == "skip":
+                            if collect_features:
+                                feature_records.append({
+                                    "entry_bar": i, "signal": int(row["signal"]),
+                                    "signal_type": sig_type, "ai_approved": False,
+                                    "win_prob": win_prob, **ai_features,
+                                })
+                            equity_curve.append(equity)
+                            continue
+                        size = max(1, int(size * tf_mult))
                         sl_ticks = risk.compute_stop_ticks(atr, bt_cfg.tick_size, sl_mult)
                         tp_ticks = risk.compute_target_ticks(sl_ticks, rr_ratio)
 
