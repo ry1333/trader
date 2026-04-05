@@ -223,7 +223,7 @@ def run_backtest_v2(
                                 should_take = False
 
                     if should_take:
-                        # Signal-type-specific stop/target sizing
+                        # Signal-type-specific stop/target sizing (from research)
                         if sig_type == SignalType.ORB:
                             sl_mult, rr_ratio = 2.5, 2.0
                         elif sig_type == SignalType.VWAP_REVERSION:
@@ -235,12 +235,16 @@ def run_backtest_v2(
                         elif sig_type == SignalType.RANGE_BREAKOUT:
                             sl_mult, rr_ratio = 2.0, 2.5
                         elif sig_type == SignalType.MOMENTUM_IGNITION:
-                            sl_mult, rr_ratio = 2.0, 2.0  # Quick in/out
+                            sl_mult, rr_ratio = 2.0, 2.0
                         elif sig_type == SignalType.VOL_CONTRACTION:
                             sl_mult, rr_ratio = 2.0, 3.0  # Squeeze = big moves
                         elif sig_type == SignalType.RSI_REVERSAL:
                             sl_mult, rr_ratio = 1.5, 2.0
-                        else:  # PREV_DAY_LEVEL, SESSION_LEVEL, etc.
+                        elif sig_type == SignalType.FAILED_BREAKOUT:
+                            sl_mult, rr_ratio = 1.0, 1.5  # Tight stop, counter-trend
+                        elif sig_type == SignalType.VWAP_RECLAIM:
+                            sl_mult, rr_ratio = 1.5, 2.0  # VWAP as anchor
+                        else:  # SESSION_LEVEL, PREV_DAY_LEVEL
                             sl_mult, rr_ratio = 2.0, 2.0
 
                         size = risk.compute_position_size(atr, bt_cfg.tick_size, bt_cfg.tick_value)
