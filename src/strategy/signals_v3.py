@@ -28,6 +28,7 @@ from enum import IntEnum
 import numpy as np
 import pandas as pd
 
+from src.strategy.odpc import detect_odpc_signals
 from src.strategy.regime import Regime
 
 
@@ -51,6 +52,7 @@ class SignalType(IntEnum):
     FAILED_BREAKOUT = 10
     VWAP_RECLAIM = 11
     SESSION_LEVEL = 12
+    ODPC = 13  # Opening Drive Pullback Continuation
 
 
 def generate_signals_v3(df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
@@ -59,6 +61,9 @@ def generate_signals_v3(df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
     signal_types = pd.Series(SignalType.NONE, index=df.index, dtype=int)
 
     n = len(df)
+
+    # Run ODPC detector first (highest priority for opening window)
+    odpc_signals, odpc_quality, _ = detect_odpc_signals(df)
 
     # Pre-compute EMAs
     ema_9 = df["close"].ewm(span=9).mean()
@@ -148,6 +153,16 @@ def generate_signals_v3(df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
         e50 = ema_50.iloc[i]
         bar_range = high - low
         bar_body = abs(close - open_price)
+
+        # ── 0. ODPC — Opening Drive Pullback Continuation (HIGHEST PRIORITY)
+        if odpc_signals.iloc[i] != 0 and odpc_quality.iloc[i] > 0.3:
+            sig = Signal.LONG if odpc_signals.iloc[i] == 1 else Signal.SHORT
+            stype = SignalType.ODPC
+            # ODPC is self-filtered (drive quality, pullback quality, VWAP, volume)
+            # Skip trend alignment filter for ODPC since it has its own qualification
+            signals.iloc[i] = sig
+            signal_types.iloc[i] = stype
+            continue
 
         # ── 1. ORB — Opening Range Breakout ───────────────────────────
         if sig == Signal.FLAT and is_rth:

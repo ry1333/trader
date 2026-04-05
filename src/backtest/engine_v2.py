@@ -235,7 +235,9 @@ def run_backtest_v2(
 
                     if should_take:
                         # Signal-type-specific stop/target sizing (from research)
-                        if sig_type == SignalType.ORB:
+                        if sig_type == SignalType.ODPC:
+                            sl_mult, rr_ratio = 1.5, 2.0  # Tight stop at pullback low, 2R target
+                        elif sig_type == SignalType.ORB:
                             sl_mult, rr_ratio = 2.5, 2.0
                         elif sig_type == SignalType.VWAP_REVERSION:
                             sl_mult, rr_ratio = 2.0, 1.5
