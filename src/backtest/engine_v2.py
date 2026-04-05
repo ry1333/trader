@@ -9,6 +9,7 @@ from loguru import logger
 from src.ai.features import extract_ai_features
 from src.ai.ev_model import EVScorer
 from src.ai.model import EnsembleScorer, TradeScorer
+from src.ai.quality_model import QualityRiskScorer
 from src.backtest.engine import BacktestResult, Trade, _close_trade
 from src.config import BacktestConfig, RiskConfig, StrategyConfig
 from src.features.engine import compute_features
@@ -107,7 +108,7 @@ def run_backtest_v2(
     strategy_cfg: StrategyConfig,
     risk_cfg: RiskConfig,
     bt_cfg: BacktestConfig,
-    scorer: TradeScorer | EnsembleScorer | EVScorer | None = None,
+    scorer: TradeScorer | EnsembleScorer | EVScorer | QualityRiskScorer | None = None,
     starting_balance: float = 50_000.0,
     collect_features: bool = False,
     training_mode: bool = False,

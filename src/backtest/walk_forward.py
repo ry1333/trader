@@ -19,6 +19,7 @@ from loguru import logger
 
 from src.ai.ev_model import EVScorer, train_ev_model
 from src.ai.model import EnsembleScorer, TradeScorer
+from src.ai.quality_model import QualityRiskScorer, train_quality_risk_model
 from src.ai.trainer import train_and_save
 from src.backtest.engine import BacktestResult
 from src.backtest.engine_v2 import run_backtest_v2
@@ -134,10 +135,9 @@ def walk_forward(
             "fees": t.fees,
         } for t in train_result.trades])
 
-        # Train EV model (predicts dollar P&L, not just win/loss)
-        ev_path = model_dir / f"{instrument}_ev_window_{window_id}.pkl"
-        ev_metadata = train_ev_model(trades_data, train_features, ev_path)
-        metadata = ev_metadata
+        # Train 3-part quality+risk+skip model
+        qr_path = model_dir / f"{instrument}_qr_window_{window_id}.pkl"
+        metadata = train_quality_risk_model(trades_data, train_features, qr_path)
         window.model_metadata = metadata
 
         if "error" in metadata:
@@ -145,32 +145,35 @@ def walk_forward(
             cursor += pd.Timedelta(days=step_days)
             continue
 
-        # ── Phase 2: Validate — sweep EV thresholds ─────────────────
-        scorer = EVScorer(ev_path)
-        best_thresh = 0.50
-        best_ev_thresh = 0.0
+        # ── Phase 2: Validate — sweep thresholds ─────────────────────
+        scorer = QualityRiskScorer(qr_path)
         best_score = float("-inf")
+        best_ev_t = 0
+        best_skip_t = 0.50
 
-        # Sweep EV thresholds (dollar values, not probabilities)
-        for ev_thresh in [-10, 0, 10, 20, 30, 50]:
-            scorer.ev_threshold = ev_thresh
-            val_result, _ = run_backtest_v2(
-                val_df, strategy_cfg, risk_cfg, bt_cfg, scorer=scorer,
-            )
-            pnl = val_result.net_pnl
-            killed = val_result.risk_summary.get("is_killed", False)
-            pf = val_result.profit_factor
-            n_trades = len(val_result.trades)
-            # Score: PnL + survival bonus + PF bonus + min trade bonus
-            score = pnl + (300 if not killed else 0) + (pf * 100 if pf > 1.0 else 0)
-            score += min(n_trades * 5, 100)  # Bonus for having trades (up to 100)
+        # Sweep EV + skip thresholds
+        for ev_t in [-10, 0, 10, 20, 30]:
+            for skip_t in [0.40, 0.50, 0.60]:
+                scorer.ev_threshold = ev_t
+                scorer.skip_threshold = skip_t
+                val_result, _ = run_backtest_v2(
+                    val_df, strategy_cfg, risk_cfg, bt_cfg, scorer=scorer,
+                )
+                pnl = val_result.net_pnl
+                killed = val_result.risk_summary.get("is_killed", False)
+                pf = val_result.profit_factor
+                n_trades = len(val_result.trades)
+                score = pnl + (300 if not killed else 0) + (pf * 100 if pf > 1.0 else 0)
+                score += min(n_trades * 5, 100)
 
-            if score > best_score:
-                best_score = score
-                best_ev_thresh = ev_thresh
+                if score > best_score:
+                    best_score = score
+                    best_ev_t = ev_t
+                    best_skip_t = skip_t
 
-        scorer.ev_threshold = best_ev_thresh
-        window.best_threshold = best_ev_thresh
+        scorer.ev_threshold = best_ev_t
+        scorer.skip_threshold = best_skip_t
+        window.best_threshold = best_ev_t
 
         # Run validation with best threshold for reporting
         val_result, _ = run_backtest_v2(
@@ -196,7 +199,7 @@ def walk_forward(
         logger.info(
             f"WF #{window_id}: train={window.train_trades}tr, "
             f"val=${val_pnl:.0f}, test=${test_pnl:.0f}, "
-            f"thresh={best_thresh:.2f}, cv={metadata.get('cv_accuracy', 'N/A')}"
+            f"thresh={window.best_threshold}, cv={metadata.get('ev_r2', metadata.get('cv_accuracy', 'N/A'))}"
         )
 
         windows.append(window)
