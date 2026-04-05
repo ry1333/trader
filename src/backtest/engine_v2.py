@@ -85,8 +85,8 @@ def _check_exit_v2(
     target_distance = abs(trade.tp_price - trade.entry_price)
 
     # ── AI Exit Decision — replaces fixed trailing stop ─────────────
-    # Only for trades that are profitable and have run past 30% of target
-    if current_pnl > 0 and trade.peak_profit > target_distance * 0.30 and df is not None:
+    # Only activate after trade has proven itself: 50% of target reached
+    if current_pnl > 0 and trade.peak_profit > target_distance * 0.50 and df is not None:
         action, trail_pct = decide_exit(
             df, bar_idx, trade.entry_price, trade.direction,
             trade.peak_profit, bars_held, atr, target_distance,
