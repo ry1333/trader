@@ -89,8 +89,8 @@ def _check_exit_v2(
     target_distance = abs(trade.tp_price - trade.entry_price)
 
     # ── AI Exit Decision — replaces fixed trailing stop ─────────────
-    # Only activate after trade has proven itself: 50% of target reached
-    if current_pnl > 0 and trade.peak_profit > target_distance * 0.50 and df is not None:
+    # Activate after meaningful profit: 35% of target (lowered for high-R:R trades)
+    if current_pnl > 0 and trade.peak_profit > target_distance * 0.35 and df is not None:
         action, trail_pct = decide_exit(
             df, bar_idx, trade.entry_price, trade.direction,
             trade.peak_profit, bars_held, atr, target_distance,
@@ -241,20 +241,10 @@ def run_backtest_v2(
                     continue
                 session_size_mult = session.size_multiplier
 
-                # Market bias: compute direction preference for sizing
+                # Direction for all downstream filters
                 direction = 1 if row["signal"] == Signal.LONG else -1
-                bias, bias_conf = compute_market_bias(df, i)
-                allow_trade, bias_size_mult = get_direction_filter(bias, direction)
-                meta_mult = 1.0  # Default, overridden by meta-gate below
-                if not allow_trade:
-                    equity_curve.append(equity)
-                    continue
-                # Also adjust the minimum confidence based on bias
-                # Counter-trend trades need higher AI confidence to pass
-                counter_trend = (
-                    (bias in (MarketBias.BEAR, MarketBias.STRONG_BEAR) and direction == 1) or
-                    (bias in (MarketBias.BULL, MarketBias.STRONG_BULL) and direction == -1)
-                )
+                meta_mult = 1.0  # Overridden by meta-gate below
+                htf_features = None  # Computed once, reused by meta-gate and trade-filter
 
                 # Volatility spike gate: skip extreme vol days
                 vol_gated = not pd.isna(atr_50) and atr_50 > 0 and atr > atr_50 * 2.0
@@ -332,13 +322,13 @@ def run_backtest_v2(
                             size = max(1, int(size * ev_mult))
                         # Session quality sizing: A-day boost, C-day reduce
                         size = max(1, int(size * session_size_mult))
-                        # Market bias sizing
-                        size = max(1, int(size * bias_size_mult))
-                        # Meta-gate sizing
+                        # Meta-gate sizing (HTF regime)
                         size = max(1, int(size * meta_mult))
 
                         # Final trade filter: rolling performance + composite score
-                        htf_features = compute_htf_regime_features(df, i)
+                        # Reuse htf_features from meta-gate if already computed
+                        if htf_features is None:
+                            htf_features = compute_htf_regime_features(df, i)
                         dd_pct = abs(risk.state.total_pnl) / risk.cfg.max_total_loss if risk.cfg.max_total_loss > 0 and risk.state.total_pnl < 0 else 0
                         vol_regime = row.get("atr_14", 0) / row.get("atr_50", 1) if not pd.isna(row.get("atr_50", None)) and row.get("atr_50", 0) > 0 else 1.0
                         tf_action, tf_mult = trade_filter.evaluate(

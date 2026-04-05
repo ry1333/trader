@@ -139,17 +139,14 @@ def walk_forward(
 
         # Triple-barrier labeling: R-multiples instead of binary win/loss
         tb_df = label_trades_triple_barrier(train_result.trades)
-        tb_df["signal_type_name"] = ""
-        # Map signal types from the training features
-        for idx, row in tb_df.iterrows():
-            feat_match = train_features[train_features["entry_bar"] == row["entry_bar"]]
-            if len(feat_match) > 0:
-                from src.strategy.signals_v3 import SignalType
-                sig_val = int(feat_match.iloc[0].get("signal_type", feat_match.iloc[0].get("signal", 0)))
-                try:
-                    tb_df.at[idx, "signal_type_name"] = SignalType(sig_val).name
-                except (ValueError, KeyError):
-                    tb_df.at[idx, "signal_type_name"] = "UNKNOWN"
+
+        # Map signal types from features (vectorized, not O(n²))
+        from src.strategy.signals_v3 import SignalType as ST
+        sig_type_col = "signal_type" if "signal_type" in train_features.columns else "signal"
+        feat_map = train_features.set_index("entry_bar")[sig_type_col].to_dict()
+        tb_df["signal_type_name"] = tb_df["entry_bar"].map(
+            lambda eb: ST(int(feat_map.get(eb, 0))).name if eb in feat_map else "UNKNOWN"
+        )
 
         # Train per-strategy model bank
         bank_path = model_dir / f"{instrument}_bank_window_{window_id}.pkl"
