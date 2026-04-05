@@ -53,15 +53,15 @@ class PullbackInfo:
 
 def detect_odpc_signals(
     df: pd.DataFrame,
-    min_drive_return: float = 0.0030,  # 0.30% minimum opening drive
-    min_volume_ratio: float = 1.5,  # Drive volume vs 20-bar avg
-    min_atr_ratio: float = 1.5,  # Opening range vs ATR
-    pb_retrace_min: float = 0.25,  # Min pullback depth
-    pb_retrace_max: float = 0.55,  # Max pullback depth
-    pb_max_bars: int = 3,  # Max pullback duration
-    pb_vol_decline: float = 0.60,  # Pullback vol must be ≤ this × drive vol
-    pb_max_wick_ratio: float = 2.0,  # Max wick/body ratio
-    entry_vol_min: float = 0.80,  # Entry bar vol vs drive avg
+    min_drive_return: float = 0.0025,  # 0.25% minimum opening drive (NQ moves big)
+    min_volume_ratio: float = 1.2,  # Drive volume vs 20-bar avg (NQ opens always have high vol)
+    min_atr_ratio: float = 1.2,  # Opening range vs ATR
+    pb_retrace_min: float = 0.15,  # Min pullback depth (shallower OK for strong drives)
+    pb_retrace_max: float = 0.65,  # Max pullback depth (wider to catch more setups)
+    pb_max_bars: int = 5,  # Max pullback duration (25 min on 5-min)
+    pb_vol_decline: float = 0.80,  # Pullback vol must be ≤ this × drive vol (loosened)
+    pb_max_wick_ratio: float = 2.5,  # Max wick/body ratio (loosened)
+    entry_vol_min: float = 0.50,  # Entry bar vol vs drive avg (pullback bars naturally lower)
 ) -> tuple[pd.Series, pd.Series, pd.Series]:
     """Detect ODPC setups. Returns (signals, signal_info, drive_quality).
 
@@ -102,24 +102,34 @@ def detect_odpc_signals(
     pb_start_bar = 0
     pb_volumes = []
     signal_fired_today = False
+    rth_open_found = False
 
     for i in range(1, n):
         cur_date = dates.iloc[i]
         cur_et_min = et_minutes.iloc[i]
 
-        # New session reset
+        # New calendar date reset
         if cur_date != prev_date:
+            signal_fired_today = False
+            rth_open_found = False
             state = ODPCState.WAITING_FOR_DRIVE
             drive = DriveInfo()
             pullback = PullbackInfo()
-            session_open = df["open"].iloc[i]
-            drive_start_bar = i
-            signal_fired_today = False
             pb_volumes = []
         prev_date = cur_date
 
+        # Detect RTH open (9:30 ET = 570 minutes) — this is the TRUE session open
+        if not rth_open_found and cur_et_min >= 570 and cur_et_min <= 575:
+            session_open = df["open"].iloc[i]
+            drive_start_bar = i
+            rth_open_found = True
+            state = ODPCState.WAITING_FOR_DRIVE
+
         # Only active during 9:35-10:15 ET (575-615 minutes)
         if cur_et_min < 575 or cur_et_min > 615:
+            continue
+
+        if not rth_open_found or session_open <= 0:
             continue
 
         # One signal per session max
@@ -171,7 +181,7 @@ def detect_odpc_signals(
 
                         if (vol_ratio >= min_volume_ratio and
                                 or_range >= min_atr_ratio * cur_atr and
-                                coherence >= 0.60):
+                                coherence >= 0.50):
                             drive = DriveInfo(
                                 direction=direction,
                                 open_price=session_open,
