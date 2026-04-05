@@ -8,6 +8,7 @@ from loguru import logger
 
 from src.ai.features import extract_ai_features
 from src.ai.ev_model import EVScorer
+from src.ai.exit_model import ExitAction, decide_exit
 from src.ai.model import EnsembleScorer, TradeScorer
 from src.ai.quality_model import QualityRiskScorer
 from src.filters.session_quality import SessionGrade, compute_session_quality
@@ -28,8 +29,9 @@ def _check_exit_v2(
     strategy_cfg: StrategyConfig,
     bt_cfg: BacktestConfig,
     signal_type: int,
+    df: pd.DataFrame | None = None,
 ) -> tuple[float | None, str]:
-    """Exit logic — proven configuration from Sharpe 1.77 run."""
+    """Exit logic with AI-driven profit management."""
 
     bars_held = bar_idx - trade.entry_bar
     current_pnl = (row["close"] - trade.entry_price) * trade.direction
@@ -82,11 +84,27 @@ def _check_exit_v2(
 
     target_distance = abs(trade.tp_price - trade.entry_price)
 
-    # ── Trailing stop: activate at 60% of target, keep 40% of peak ───
-    if target_distance > 0 and trade.peak_profit > target_distance * 0.60:
-        trail_keep = trade.peak_profit * 0.40
-        if current_pnl < trail_keep:
-            return row["close"], "trailing_stop"
+    # ── AI Exit Decision — replaces fixed trailing stop ─────────────
+    # Only for trades that are profitable and have run past 30% of target
+    if current_pnl > 0 and trade.peak_profit > target_distance * 0.30 and df is not None:
+        action, trail_pct = decide_exit(
+            df, bar_idx, trade.entry_price, trade.direction,
+            trade.peak_profit, bars_held, atr, target_distance,
+        )
+
+        if action == ExitAction.EXIT:
+            return row["close"], "ai_exit"
+
+        elif action == ExitAction.TIGHTEN:
+            trail_keep = trade.peak_profit * trail_pct
+            if current_pnl < trail_keep:
+                return row["close"], "trailing_stop"
+
+        elif action == ExitAction.HOLD:
+            # Wide trail — only exit on massive pullback
+            trail_keep = trade.peak_profit * trail_pct
+            if current_pnl < trail_keep:
+                return row["close"], "trailing_stop"
 
     # ── VWAP target for reversion trades ──────────────────────────────
     REVERSION_TYPES = {SignalType.VWAP_REVERSION, SignalType.VWAP_RECLAIM,
@@ -163,7 +181,7 @@ def run_backtest_v2(
         # ── Check exit ────────────────────────────────────────────────
         if active_trade is not None:
             exit_price, exit_reason = _check_exit_v2(
-                active_trade, row, i, ct_minutes, strategy_cfg, bt_cfg, active_signal_type
+                active_trade, row, i, ct_minutes, strategy_cfg, bt_cfg, active_signal_type, df
             )
             if exit_price is not None:
                 _close_trade(active_trade, exit_price, i, exit_reason, bt_cfg, risk)
