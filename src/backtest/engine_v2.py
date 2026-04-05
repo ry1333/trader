@@ -9,6 +9,7 @@ from loguru import logger
 from src.ai.features import extract_ai_features
 from src.ai.ev_model import EVScorer
 from src.ai.exit_model import ExitAction, decide_exit
+from src.ai.meta_model import compute_htf_regime_features, meta_gate_decision
 from src.ai.model import EnsembleScorer, TradeScorer
 from src.ai.quality_model import QualityRiskScorer
 from src.filters.market_bias import MarketBias, compute_market_bias, get_direction_filter
@@ -236,6 +237,7 @@ def run_backtest_v2(
                 direction = 1 if row["signal"] == Signal.LONG else -1
                 bias, bias_conf = compute_market_bias(df, i)
                 allow_trade, bias_size_mult = get_direction_filter(bias, direction)
+                meta_mult = 1.0  # Default, overridden by meta-gate below
                 if not allow_trade:
                     equity_curve.append(equity)
                     continue
@@ -265,9 +267,16 @@ def run_backtest_v2(
                             # C-grade sessions: require higher confidence
                             if session.grade == SessionGrade.C and win_prob < 0.58:
                                 should_take = False
-                            # Counter-trend trades need higher confidence
-                            if counter_trend and win_prob < 0.58:
-                                should_take = False
+
+                            # Meta-gate: higher-timeframe regime context
+                            if should_take:
+                                htf_features = compute_htf_regime_features(df, i)
+                                meta_action, mm = meta_gate_decision(
+                                    htf_features, direction, win_prob
+                                )
+                                meta_mult = mm  # Applied to sizing below
+                                if meta_action == "skip":
+                                    should_take = False
 
                     if should_take:
                         # Signal-type-specific stop/target sizing (from research)
@@ -305,6 +314,8 @@ def run_backtest_v2(
                         size = max(1, int(size * session_size_mult))
                         # Market bias sizing: boost with-trend, reduce counter-trend
                         size = max(1, int(size * bias_size_mult))
+                        # Meta-gate sizing: HTF regime adjustment
+                        size = max(1, int(size * meta_mult))
                         sl_ticks = risk.compute_stop_ticks(atr, bt_cfg.tick_size, sl_mult)
                         tp_ticks = risk.compute_target_ticks(sl_ticks, rr_ratio)
 
