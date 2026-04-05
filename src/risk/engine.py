@@ -85,29 +85,45 @@ class RiskEngine:
 
         return True
 
-    def compute_position_size(self, atr: float, tick_size: float, tick_value: float) -> int:
-        """Compute position size based on ATR and risk budget.
+    def compute_position_size(
+        self, atr: float, tick_size: float, tick_value: float,
+        atr_50: float = 0,
+    ) -> int:
+        """Compute position size with volatility targeting.
 
-        Tiered sizing:
-        - Base: risk_per_trade_pct * balance, capped at max_risk_per_trade
-        - After daily loss tier1: reduce to 1 contract
-        - After 2 consecutive losses: 50% reduction
-        - After 3+ consecutive losses: 25% reduction
+        Volatility-targeted sizing (research-backed):
+        - Low vol (ATR < ATR_50): BIGGER positions (trends are clean)
+        - High vol (ATR > ATR_50): SMALLER positions (noise is high)
+        - This mechanically reduces drawdowns in volatile periods
+
+        Also includes:
+        - Tiered daily loss reduction
+        - Consecutive loss scaling
+        - Proportional budget scaling
         """
         if atr <= 0:
             return 0
 
         risk_budget = self.cfg.risk_per_trade_pct / 100 * self.state.current_balance
-
-        # Hard dollar cap
         risk_budget = min(risk_budget, self.cfg.max_risk_per_trade)
 
         # Tiered daily loss reduction
         if self.state.day_pnl <= -self.cfg.daily_loss_tier1:
-            # After tier1 loss: minimum size only
             atr_ticks = atr / tick_size
             risk_per_contract = atr_ticks * tick_value
             return 1 if risk_per_contract > 0 else 0
+
+        # Volatility targeting: inverse vol scaling
+        # When vol is low (calm trend): size UP
+        # When vol is high (chaos): size DOWN
+        if atr_50 > 0:
+            vol_ratio = atr / atr_50
+            if vol_ratio < 0.8:
+                risk_budget *= 1.3  # Low vol = calm trend = size up
+            elif vol_ratio > 1.5:
+                risk_budget *= 0.5  # High vol = chaos = size down
+            elif vol_ratio > 1.2:
+                risk_budget *= 0.7  # Elevated vol = moderate reduction
 
         # Consecutive loss scaling
         if self.state.consecutive_losses >= 3:

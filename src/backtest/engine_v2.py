@@ -305,7 +305,9 @@ def run_backtest_v2(
                         else:  # SESSION_LEVEL, PREV_DAY_LEVEL
                             sl_mult, rr_ratio = 2.0, 2.0
 
-                        size = risk.compute_position_size(atr, bt_cfg.tick_size, bt_cfg.tick_value)
+                        atr_50_val = row.get("atr_50", 0)
+                        atr_50_val = atr_50_val if not pd.isna(atr_50_val) else 0
+                        size = risk.compute_position_size(atr, bt_cfg.tick_size, bt_cfg.tick_value, atr_50_val)
                         # EV-based sizing: scale by prediction confidence
                         if hasattr(scorer, 'get_size_multiplier'):
                             ev_mult = scorer.get_size_multiplier()
