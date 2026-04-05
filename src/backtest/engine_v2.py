@@ -12,6 +12,7 @@ from src.ai.exit_model import ExitAction, decide_exit
 from src.ai.meta_model import compute_htf_regime_features, meta_gate_decision
 from src.ai.model import EnsembleScorer, TradeScorer
 from src.ai.quality_model import QualityRiskScorer
+from src.ai.strategy_bank import StrategyModelBank
 from src.filters.market_bias import MarketBias, compute_market_bias, get_direction_filter
 from src.filters.session_quality import SessionGrade, compute_session_quality
 from src.backtest.engine import BacktestResult, Trade, _close_trade
@@ -128,7 +129,7 @@ def run_backtest_v2(
     strategy_cfg: StrategyConfig,
     risk_cfg: RiskConfig,
     bt_cfg: BacktestConfig,
-    scorer: TradeScorer | EnsembleScorer | EVScorer | QualityRiskScorer | None = None,
+    scorer: TradeScorer | EnsembleScorer | EVScorer | QualityRiskScorer | StrategyModelBank | None = None,
     starting_balance: float = 50_000.0,
     collect_features: bool = False,
     training_mode: bool = False,
@@ -260,7 +261,13 @@ def run_backtest_v2(
                     if scorer or collect_features:
                         ai_features = extract_ai_features(df, i)
                         if scorer and scorer.model is not None:
-                            should_take, win_prob = scorer.should_trade(ai_features)
+                            # Per-strategy scoring if StrategyModelBank
+                            if isinstance(scorer, StrategyModelBank):
+                                strategy_name = SignalType(sig_type).name
+                                should_take, win_prob = scorer.should_trade(
+                                    ai_features, strategy_name, direction)
+                            else:
+                                should_take, win_prob = scorer.should_trade(ai_features)
                             # Minimum confidence floor
                             if win_prob < 0.50:
                                 should_take = False
@@ -308,8 +315,12 @@ def run_backtest_v2(
                         atr_50_val = row.get("atr_50", 0)
                         atr_50_val = atr_50_val if not pd.isna(atr_50_val) else 0
                         size = risk.compute_position_size(atr, bt_cfg.tick_size, bt_cfg.tick_value, atr_50_val)
-                        # EV-based sizing: scale by prediction confidence
-                        if hasattr(scorer, 'get_size_multiplier'):
+                        # Strategy-specific or EV-based sizing
+                        if isinstance(scorer, StrategyModelBank):
+                            strategy_name = SignalType(sig_type).name
+                            ev_mult = scorer.get_size_multiplier(strategy_name, direction)
+                            size = max(1, int(size * ev_mult))
+                        elif hasattr(scorer, 'get_size_multiplier'):
                             ev_mult = scorer.get_size_multiplier()
                             size = max(1, int(size * ev_mult))
                         # Session quality sizing: A-day boost, C-day reduce

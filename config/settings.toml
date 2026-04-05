@@ -31,7 +31,7 @@ session_start_ct = "17:00"
 consistency_target = 0.50
 
 [backtest]
-train_window_days = 180
+train_window_days = 730
 val_window_days = 30
 test_window_days = 30
 walk_forward_step_days = 30

@@ -22,9 +22,8 @@ DATA_DIR = Path(__file__).resolve().parent.parent / "data_cache"
 RESULTS_DIR = Path(__file__).resolve().parent.parent / "results"
 
 INSTRUMENT_DATA = {
-    "MNQ": "nq_5m_2y_databento.csv",   # Sharpe 1.77, primary edge
-    "MGC": "gc_5m_2y_databento.csv",    # Sharpe 0.38, secondary
-    # MCL dropped — -$871, dragging combined results
+    "MNQ": "nq_5m_full.csv",   # 10 years (2016-2026), 687K bars
+    "MGC": "gc_5m_full.csv",   # 10 years (2016-2026), 709K bars
 }
 
 
