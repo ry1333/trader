@@ -222,9 +222,9 @@ def run_backtest_v2(
                         equity_curve.append(equity)
                         continue
 
-                # Time-of-day filter: only trade 8:30 AM - 1:00 PM CT
-                # Audit: pre-open -$3,761, afternoon -$298. Only open/mid-morning/lunch profitable.
-                if ct_minutes < 510 or ct_minutes >= 780:
+                # Time-of-day filter: only during RTH (8:30 AM - 3:00 PM CT)
+                # Let per-strategy models decide which hours are profitable
+                if ct_minutes < 510 or ct_minutes >= 900:
                     equity_curve.append(equity)
                     continue
 
