@@ -17,7 +17,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from loguru import logger
-from sklearn.ensemble import GradientBoostingClassifier, GradientBoostingRegressor
+import lightgbm as lgb
 from sklearn.model_selection import KFold, cross_val_score
 
 from src.ai.features import AI_FEATURE_COLS
@@ -238,10 +238,11 @@ def train_strategy_bank(
         model.feature_names = feature_cols
         model.n_samples = n
 
-        # Train EV regressor on R-multiples
-        ev_model = GradientBoostingRegressor(
+        # Train EV regressor on R-multiples (LightGBM — faster + better regularization)
+        ev_model = lgb.LGBMRegressor(
             n_estimators=100, max_depth=3, learning_rate=0.1,
-            min_samples_leaf=max(5, n // 50), random_state=42)
+            min_child_samples=max(3, n // 50), reg_alpha=0.1, reg_lambda=0.1,
+            random_state=42, verbose=-1)
         n_splits = min(5, max(2, n // 20))
         if n_splits >= 2:
             cv = KFold(n_splits=n_splits, shuffle=True, random_state=42)
@@ -252,10 +253,11 @@ def train_strategy_bank(
         model.ev_model = ev_model
         model.cv_r2 = round(ev_r2, 4)
 
-        # Train skip classifier
-        skip_model = GradientBoostingClassifier(
+        # Train skip classifier (LightGBM)
+        skip_model = lgb.LGBMClassifier(
             n_estimators=80, max_depth=3, learning_rate=0.1,
-            min_samples_leaf=max(5, n // 50), random_state=42)
+            min_child_samples=max(3, n // 50), reg_alpha=0.1, reg_lambda=0.1,
+            random_state=42, verbose=-1)
         if n_splits >= 2 and len(np.unique(y_skip)) > 1:
             cv = KFold(n_splits=n_splits, shuffle=True, random_state=42)
             skip_acc = cross_val_score(skip_model, X, y_skip, cv=cv, scoring="accuracy").mean()
@@ -308,7 +310,7 @@ def train_strategy_bank(
 
     fallback = StrategyModel()
     fallback.feature_names = feature_cols
-    fb_ev = GradientBoostingRegressor(n_estimators=80, max_depth=3, min_samples_leaf=5, random_state=42)
+    fb_ev = lgb.LGBMRegressor(n_estimators=80, max_depth=3, min_child_samples=5, reg_alpha=0.1, verbose=-1, random_state=42)
     fb_ev.fit(all_X, all_y)
     fallback.ev_model = fb_ev
     bank.fallback = fallback
