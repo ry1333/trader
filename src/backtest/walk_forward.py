@@ -20,9 +20,7 @@ from loguru import logger
 from src.ai.ev_model import EVScorer, train_ev_model
 from src.ai.model import EnsembleScorer, TradeScorer
 from src.ai.quality_model import QualityRiskScorer, train_quality_risk_model
-from src.ai.strategy_bank import StrategyModelBank, train_strategy_bank
 from src.ai.trainer import train_and_save
-from src.ai.triple_barrier import label_trades_triple_barrier
 from src.backtest.engine import BacktestResult
 from src.backtest.engine_v2 import run_backtest_v2
 from src.config import BacktestConfig, RiskConfig, StrategyConfig
@@ -137,35 +135,45 @@ def walk_forward(
             "fees": t.fees,
         } for t in train_result.trades])
 
-        # Triple-barrier labeling: R-multiples instead of binary win/loss
-        tb_df = label_trades_triple_barrier(train_result.trades)
-
-        # Map signal types from features (vectorized, not O(n²))
-        from src.strategy.signals_v3 import SignalType as ST
-        sig_type_col = "signal_type" if "signal_type" in train_features.columns else "signal"
-        feat_map = train_features.set_index("entry_bar")[sig_type_col].to_dict()
-        tb_df["signal_type_name"] = tb_df["entry_bar"].map(
-            lambda eb: ST(int(feat_map.get(eb, 0))).name if eb in feat_map else "UNKNOWN"
-        )
-
-        # Train per-strategy model bank
-        bank_path = model_dir / f"{instrument}_bank_window_{window_id}.pkl"
-        metadata = train_strategy_bank(tb_df, train_features, bank_path)
+        # Train 3-part quality+risk+skip model
+        qr_path = model_dir / f"{instrument}_qr_window_{window_id}.pkl"
+        metadata = train_quality_risk_model(trades_data, train_features, qr_path)
         window.model_metadata = metadata
 
-        if metadata.get("total_models", 0) == 0:
-            logger.warning(f"WF #{window_id}: no models trained")
+        if "error" in metadata:
+            logger.warning(f"WF #{window_id}: training failed: {metadata}")
             cursor += pd.Timedelta(days=step_days)
             continue
 
         # ── Phase 2: Validate — sweep thresholds ─────────────────────
-        scorer = StrategyModelBank()
-        scorer.load(bank_path)
-        # Validate: run with the trained models (thresholds already optimized per-model)
-        val_result, _ = run_backtest_v2(
-            val_df, strategy_cfg, risk_cfg, bt_cfg, scorer=scorer,
-        )
-        window.best_threshold = metadata.get("total_models", 0)
+        scorer = QualityRiskScorer(qr_path)
+        best_score = float("-inf")
+        best_ev_t = 0
+        best_skip_t = 0.50
+
+        # Sweep EV + skip thresholds
+        for ev_t in [-10, 0, 10, 20, 30]:
+            for skip_t in [0.40, 0.50, 0.60]:
+                scorer.ev_threshold = ev_t
+                scorer.skip_threshold = skip_t
+                val_result, _ = run_backtest_v2(
+                    val_df, strategy_cfg, risk_cfg, bt_cfg, scorer=scorer,
+                )
+                pnl = val_result.net_pnl
+                killed = val_result.risk_summary.get("is_killed", False)
+                pf = val_result.profit_factor
+                n_trades = len(val_result.trades)
+                score = pnl + (300 if not killed else 0) + (pf * 100 if pf > 1.0 else 0)
+                score += min(n_trades * 5, 100)
+
+                if score > best_score:
+                    best_score = score
+                    best_ev_t = ev_t
+                    best_skip_t = skip_t
+
+        scorer.ev_threshold = best_ev_t
+        scorer.skip_threshold = best_skip_t
+        window.best_threshold = best_ev_t
 
         # Run validation with best threshold for reporting
         val_result, _ = run_backtest_v2(

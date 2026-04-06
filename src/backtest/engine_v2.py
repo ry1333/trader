@@ -8,14 +8,9 @@ from loguru import logger
 
 from src.ai.features import extract_ai_features
 from src.ai.ev_model import EVScorer
-from src.ai.exit_model import ExitAction, decide_exit
-from src.ai.meta_model import compute_htf_regime_features, meta_gate_decision
 from src.ai.model import EnsembleScorer, TradeScorer
 from src.ai.quality_model import QualityRiskScorer
-from src.ai.strategy_bank import StrategyModelBank
-from src.filters.market_bias import MarketBias, compute_market_bias, get_direction_filter
 from src.filters.session_quality import SessionGrade, compute_session_quality
-from src.filters.trade_filter import TradeFilter
 from src.backtest.engine import BacktestResult, Trade, _close_trade
 from src.config import BacktestConfig, RiskConfig, StrategyConfig
 from src.features.engine import compute_features
@@ -33,9 +28,8 @@ def _check_exit_v2(
     strategy_cfg: StrategyConfig,
     bt_cfg: BacktestConfig,
     signal_type: int,
-    df: pd.DataFrame | None = None,
 ) -> tuple[float | None, str]:
-    """Exit logic with AI-driven profit management."""
+    """Exit logic — proven configuration from Sharpe 1.77 run."""
 
     bars_held = bar_idx - trade.entry_bar
     current_pnl = (row["close"] - trade.entry_price) * trade.direction
@@ -88,27 +82,11 @@ def _check_exit_v2(
 
     target_distance = abs(trade.tp_price - trade.entry_price)
 
-    # ── AI Exit Decision — replaces fixed trailing stop ─────────────
-    # Activate after meaningful profit: 35% of target (lowered for high-R:R trades)
-    if current_pnl > 0 and trade.peak_profit > target_distance * 0.35 and df is not None:
-        action, trail_pct = decide_exit(
-            df, bar_idx, trade.entry_price, trade.direction,
-            trade.peak_profit, bars_held, atr, target_distance,
-        )
-
-        if action == ExitAction.EXIT:
-            return row["close"], "ai_exit"
-
-        elif action == ExitAction.TIGHTEN:
-            trail_keep = trade.peak_profit * trail_pct
-            if current_pnl < trail_keep:
-                return row["close"], "trailing_stop"
-
-        elif action == ExitAction.HOLD:
-            # Wide trail — only exit on massive pullback
-            trail_keep = trade.peak_profit * trail_pct
-            if current_pnl < trail_keep:
-                return row["close"], "trailing_stop"
+    # ── Trailing stop: activate at 60% of target, keep 40% of peak ───
+    if target_distance > 0 and trade.peak_profit > target_distance * 0.60:
+        trail_keep = trade.peak_profit * 0.40
+        if current_pnl < trail_keep:
+            return row["close"], "trailing_stop"
 
     # ── VWAP target for reversion trades ──────────────────────────────
     REVERSION_TYPES = {SignalType.VWAP_REVERSION, SignalType.VWAP_RECLAIM,
@@ -130,7 +108,7 @@ def run_backtest_v2(
     strategy_cfg: StrategyConfig,
     risk_cfg: RiskConfig,
     bt_cfg: BacktestConfig,
-    scorer: TradeScorer | EnsembleScorer | EVScorer | QualityRiskScorer | StrategyModelBank | None = None,
+    scorer: TradeScorer | EnsembleScorer | EVScorer | QualityRiskScorer | None = None,
     starting_balance: float = 50_000.0,
     collect_features: bool = False,
     training_mode: bool = False,
@@ -161,9 +139,6 @@ def run_backtest_v2(
     # Signal-type consecutive loss tracking for circuit breaker
     signal_type_losses: dict[int, int] = {}
 
-    # Hard quantitative trade filter with rolling performance
-    trade_filter = TradeFilter()
-
     for i in range(len(df)):
         row = df.iloc[i]
         ts = row["timestamp"]
@@ -188,18 +163,15 @@ def run_backtest_v2(
         # ── Check exit ────────────────────────────────────────────────
         if active_trade is not None:
             exit_price, exit_reason = _check_exit_v2(
-                active_trade, row, i, ct_minutes, strategy_cfg, bt_cfg, active_signal_type, df
+                active_trade, row, i, ct_minutes, strategy_cfg, bt_cfg, active_signal_type
             )
             if exit_price is not None:
                 _close_trade(active_trade, exit_price, i, exit_reason, bt_cfg, risk)
                 trades.append(active_trade)
                 equity = risk.state.current_balance
 
-                # Record for trade filter + circuit breaker
+                # Track signal-type losses for circuit breaker
                 net_pnl = active_trade.pnl - active_trade.fees
-                trade_filter.record_trade(
-                    SignalType(active_signal_type).name if active_signal_type else "UNKNOWN",
-                    active_trade.direction, net_pnl)
                 if net_pnl <= 0:
                     signal_type_losses[active_signal_type] = signal_type_losses.get(active_signal_type, 0) + 1
                 else:
@@ -222,29 +194,24 @@ def run_backtest_v2(
                         equity_curve.append(equity)
                         continue
 
-                # Time-of-day filter: 8:30 AM - 1:00 PM CT only
-                # Verified: afternoon trades lost $1,369 on blind test. Morning = +$2,221.
+                # Time-of-day filter: only trade 8:30 AM - 1:00 PM CT
+                # Audit: pre-open -$3,761, afternoon -$298. Only open/mid-morning/lunch profitable.
                 if ct_minutes < 510 or ct_minutes >= 780:
                     equity_curve.append(equity)
                     continue
 
                 # Signal-type circuit breaker: 3 consecutive losses → skip
                 sig_type = int(row["signal_type"])
-                if not training_mode and signal_type_losses.get(sig_type, 0) >= 3:
+                if signal_type_losses.get(sig_type, 0) >= 3:
                     equity_curve.append(equity)
                     continue
 
                 # Session quality filter: skip chop + news + grade-based sizing
                 session = compute_session_quality(df, i)
-                if not training_mode and session.grade == SessionGrade.D:
+                if session.grade == SessionGrade.D:
                     equity_curve.append(equity)
-                    continue
+                    continue  # No trading: extreme chop or news volatility
                 session_size_mult = session.size_multiplier
-
-                # Direction for all downstream filters
-                direction = 1 if row["signal"] == Signal.LONG else -1
-                meta_mult = 1.0  # Overridden by meta-gate below
-                htf_features = None  # Computed once, reused by meta-gate and trade-filter
 
                 # Volatility spike gate: skip extreme vol days
                 vol_gated = not pd.isna(atr_50) and atr_50 > 0 and atr > atr_50 * 2.0
@@ -257,30 +224,14 @@ def run_backtest_v2(
 
                     if scorer or collect_features:
                         ai_features = extract_ai_features(df, i)
-                        if scorer and scorer.model is not None and not training_mode:
-                            # Per-strategy scoring if StrategyModelBank
-                            if isinstance(scorer, StrategyModelBank):
-                                strategy_name = SignalType(sig_type).name
-                                should_take, win_prob = scorer.should_trade(
-                                    ai_features, strategy_name, direction)
-                            else:
-                                should_take, win_prob = scorer.should_trade(ai_features)
+                        if scorer and scorer.model is not None:
+                            should_take, win_prob = scorer.should_trade(ai_features)
                             # Minimum confidence floor
                             if win_prob < 0.50:
                                 should_take = False
                             # C-grade sessions: require higher confidence
                             if session.grade == SessionGrade.C and win_prob < 0.58:
                                 should_take = False
-
-                            # Meta-gate: higher-timeframe regime context
-                            if should_take:
-                                htf_features = compute_htf_regime_features(df, i)
-                                meta_action, mm = meta_gate_decision(
-                                    htf_features, direction, win_prob
-                                )
-                                meta_mult = mm  # Applied to sizing below
-                                if meta_action == "skip":
-                                    should_take = False
 
                     if should_take:
                         # Signal-type-specific stop/target sizing (from research)
@@ -309,69 +260,13 @@ def run_backtest_v2(
                         else:  # SESSION_LEVEL, PREV_DAY_LEVEL
                             sl_mult, rr_ratio = 2.0, 2.0
 
-                        atr_50_val = row.get("atr_50", 0)
-                        atr_50_val = atr_50_val if not pd.isna(atr_50_val) else 0
-                        size = risk.compute_position_size(atr, bt_cfg.tick_size, bt_cfg.tick_value, atr_50_val)
-                        # Strategy-specific or EV-based sizing
-                        if isinstance(scorer, StrategyModelBank):
-                            strategy_name = SignalType(sig_type).name
-                            ev_mult = scorer.get_size_multiplier(strategy_name, direction)
-                            size = max(1, int(size * ev_mult))
-                        elif hasattr(scorer, 'get_size_multiplier'):
+                        size = risk.compute_position_size(atr, bt_cfg.tick_size, bt_cfg.tick_value)
+                        # EV-based sizing: scale by prediction confidence
+                        if hasattr(scorer, 'get_size_multiplier'):
                             ev_mult = scorer.get_size_multiplier()
                             size = max(1, int(size * ev_mult))
                         # Session quality sizing: A-day boost, C-day reduce
                         size = max(1, int(size * session_size_mult))
-                        # Meta-gate sizing (HTF regime)
-                        size = max(1, int(size * meta_mult))
-
-                        # Final trade filter (skip during training — need all trades for data)
-                        if training_mode:
-                            sl_ticks = risk.compute_stop_ticks(atr, bt_cfg.tick_size, sl_mult)
-                            tp_ticks = risk.compute_target_ticks(sl_ticks, rr_ratio)
-                            direction = 1 if row["signal"] == Signal.LONG else -1
-                            entry_price = row["close"] + (bt_cfg.slippage_ticks * bt_cfg.tick_size * direction)
-                            sl_price = entry_price - (sl_ticks * bt_cfg.tick_size * direction)
-                            tp_price = entry_price + (tp_ticks * bt_cfg.tick_size * direction)
-                            active_trade = Trade(
-                                entry_bar=i, entry_price=entry_price, direction=direction,
-                                size=size, sl_price=sl_price, tp_price=tp_price,
-                            )
-                            active_signal_type = sig_type
-                            if collect_features:
-                                feature_records.append({
-                                    "entry_bar": i, "signal": int(row["signal"]),
-                                    "signal_type": int(row["signal_type"]),
-                                    "ai_approved": True, "win_prob": 0.5, **ai_features,
-                                })
-                            equity_curve.append(equity)
-                            continue
-
-                        # Reuse htf_features from meta-gate if already computed
-                        if htf_features is None:
-                            htf_features = compute_htf_regime_features(df, i)
-                        dd_pct = abs(risk.state.total_pnl) / risk.cfg.max_total_loss if risk.cfg.max_total_loss > 0 and risk.state.total_pnl < 0 else 0
-                        vol_regime = row.get("atr_14", 0) / row.get("atr_50", 1) if not pd.isna(row.get("atr_50", None)) and row.get("atr_50", 0) > 0 else 1.0
-                        tf_action, tf_mult = trade_filter.evaluate(
-                            strategy=SignalType(sig_type).name,
-                            direction=direction,
-                            ai_confidence=win_prob,
-                            htf_bearish_count=htf_features.get("htf_bearish_count", 0),
-                            htf_bullish_count=htf_features.get("htf_bullish_count", 0),
-                            session_grade=int(session.grade),
-                            vol_regime=vol_regime,
-                            current_drawdown_pct=dd_pct,
-                        )
-                        if tf_action == "skip":
-                            if collect_features:
-                                feature_records.append({
-                                    "entry_bar": i, "signal": int(row["signal"]),
-                                    "signal_type": sig_type, "ai_approved": False,
-                                    "win_prob": win_prob, **ai_features,
-                                })
-                            equity_curve.append(equity)
-                            continue
-                        size = max(1, int(size * tf_mult))
                         sl_ticks = risk.compute_stop_ticks(atr, bt_cfg.tick_size, sl_mult)
                         tp_ticks = risk.compute_target_ticks(sl_ticks, rr_ratio)
 

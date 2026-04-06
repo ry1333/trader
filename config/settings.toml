@@ -10,32 +10,32 @@ user_hub = "https://gateway-rtc-demo.s2f.projectx.com/hubs/user"
 # user_hub = "https://rtc.topstepx.com/hubs/user"
 
 [strategy]
-instrument = "MES"
+instrument = "MES"          # Micro E-mini S&P 500 (1/10th ES size)
 bar_interval_minutes = 5
 max_trades_per_day = 10
-max_hold_bars = 48
+max_hold_bars = 48          # 240 minutes (4 hours) — let winners run
 
 [risk]
-# Topstep $50K — proven config (Sharpe 1.77 on MNQ)
+# Topstep $50K account rules
 max_daily_loss = 2000.0
-max_total_loss = 2000.0
-max_position_size = 5
-risk_per_trade_pct = 0.40
-max_risk_per_trade = 200.0
-daily_loss_tier1 = 500.0
-daily_loss_tier2 = 1000.0
-weekly_loss_limit = 1500.0
-max_simultaneous_positions = 2
-flatten_time_ct = "15:00"
-session_start_ct = "17:00"
-consistency_target = 0.50
+max_total_loss = 2000.0     # Maximum Loss Limit
+max_position_size = 5       # Default max contracts per trade
+risk_per_trade_pct = 0.40   # of account balance
+max_risk_per_trade = 200.0  # Hard dollar cap per trade
+daily_loss_tier1 = 500.0    # Cut to minimum size after this
+daily_loss_tier2 = 1000.0   # Stop trading for the day after this
+weekly_loss_limit = 1500.0  # Pause for week after this
+max_simultaneous_positions = 2  # Portfolio heat limit
+flatten_time_ct = "15:00"   # 3:00 PM CT (10 min buffer before 3:10)
+session_start_ct = "17:00"  # 5:00 PM CT previous day
+consistency_target = 0.50   # best day < 50% of profit target
 
 [backtest]
-train_window_days = 730
+train_window_days = 180     # 6 months for walk-forward training
 val_window_days = 30
 test_window_days = 30
 walk_forward_step_days = 30
-cost_per_side_per_contract = 0.62
+cost_per_side_per_contract = 0.62  # MES Topstep fees
 slippage_ticks = 1
 tick_size = 0.25
-tick_value = 1.25
+tick_value = 1.25           # MES: $1.25 per tick (1/10th of ES)

@@ -6,7 +6,7 @@ name = "Micro E-mini Nasdaq 100"
 tick_size = 0.25
 tick_value = 0.50
 cost_per_side = 0.62
-max_position = 12
+max_position = 10
 data_file = "nq_5m_2y_databento.csv"
 
 [MGC]
