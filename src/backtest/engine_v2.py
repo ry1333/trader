@@ -222,9 +222,9 @@ def run_backtest_v2(
                         equity_curve.append(equity)
                         continue
 
-                # Time-of-day filter: only during RTH (8:30 AM - 3:00 PM CT)
-                # Let per-strategy models decide which hours are profitable
-                if ct_minutes < 510 or ct_minutes >= 900:
+                # Time-of-day filter: 8:30 AM - 1:00 PM CT only
+                # Verified: afternoon trades lost $1,369 on blind test. Morning = +$2,221.
+                if ct_minutes < 510 or ct_minutes >= 780:
                     equity_curve.append(equity)
                     continue
 
