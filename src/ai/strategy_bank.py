@@ -39,7 +39,7 @@ MERGE_MAP = {
     "SESSION_LEVEL": "RANGE_BREAKOUT",
 }
 
-MIN_SAMPLES = 50  # Minimum trades to train a model
+MIN_SAMPLES = 20  # Lowered from 50 — MGC has fewer signals per strategy
 
 
 class StrategyModel:
