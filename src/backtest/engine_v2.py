@@ -230,13 +230,13 @@ def run_backtest_v2(
 
                 # Signal-type circuit breaker: 3 consecutive losses → skip
                 sig_type = int(row["signal_type"])
-                if signal_type_losses.get(sig_type, 0) >= 3:
+                if not training_mode and signal_type_losses.get(sig_type, 0) >= 3:
                     equity_curve.append(equity)
                     continue
 
                 # Session quality filter: skip chop + news + grade-based sizing
                 session = compute_session_quality(df, i)
-                if session.grade == SessionGrade.D:
+                if not training_mode and session.grade == SessionGrade.D:
                     equity_curve.append(equity)
                     continue
                 session_size_mult = session.size_multiplier
