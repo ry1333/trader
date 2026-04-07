@@ -32,3 +32,11 @@ tick_value = 1.00
 cost_per_side = 0.62
 max_position = 5
 data_file = "cl_5m_2y_databento.csv"
+
+[MBT]
+name = "Micro Bitcoin"
+tick_size = 5.0
+tick_value = 0.50
+cost_per_side = 0.62
+max_position = 3
+data_file = "btc_5m_2y.csv"
