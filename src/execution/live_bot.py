@@ -284,8 +284,12 @@ class LiveBot:
             size_mult = 1.0
 
         # ── Compute stop/target in ticks ──────────────────────────────
-        tick_size = 0.25  # MNQ
-        tick_value = 0.50
+        TICK_MAP = {
+            "MNQ": (0.25, 0.50),
+            "MGC": (0.10, 1.00),
+            "MBT": (5.00, 0.50),
+        }
+        tick_size, tick_value = TICK_MAP.get(self.instrument, (0.25, 0.50))
         sl_ticks = max(4, int(atr * sl_mult / tick_size))
         tp_ticks = max(4, int(sl_ticks * rr_ratio))
 

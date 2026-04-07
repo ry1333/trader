@@ -12,7 +12,8 @@ BTC-specific parameters:
 - 5 BTC strategies: Momentum, London Breakout, US ORB, Liquidation, Gap Fill
 """
 import warnings; warnings.filterwarnings("ignore")
-import sys; sys.path.insert(0, "/root/trader")
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import pandas as pd, numpy as np
 from src.config import BacktestConfig, RiskConfig
 from src.backtest.engine_btc import run_backtest_btc, compute_btc_strategy_stats
@@ -75,7 +76,7 @@ while True:
         train_df, risk_cfg, bt_cfg, stats_bank=None,
         training_mode=True)
 
-    if len(train_trades) < 10:
+    if len(train_trades) < 5:
         print(f"  Only {len(train_trades)} training trades — skipping")
         cursor += pd.Timedelta(days=30)
         continue
