@@ -32,6 +32,7 @@ class BTCSignalType(IntEnum):
     NONE = 0
     BTC_TREND_PULLBACK = 1
     BTC_US_ORB = 2
+    BTC_LONDON_BREAKOUT = 3
 
 
 def _compute_htf_layers(df_ltf: pd.DataFrame) -> pd.DataFrame:
@@ -196,6 +197,47 @@ def compute_btc_features(df: pd.DataFrame) -> pd.DataFrame:
     df["_session_id"] = _session_ids
     df["btc_us_or_high"] = df["_session_id"].map(us_or_high)
     df["btc_us_or_low"] = df["_session_id"].map(us_or_low)
+
+    # ── Asian range for London breakout (tighter: 8 PM - 2 AM ET) ────
+    # 8 PM = 1200 min, 2 AM = 120 min (next day)
+    is_trimmed_asia = ((et_minutes >= 1200) | (et_minutes < 120)).astype(int)
+
+    asian_high = {}
+    asian_low = {}
+    for i in range(len(df)):
+        s = _session_ids[i]
+        if is_trimmed_asia.iloc[i]:
+            if s not in asian_high:
+                asian_high[s] = df["high"].iloc[i]
+                asian_low[s] = df["low"].iloc[i]
+            else:
+                asian_high[s] = max(asian_high[s], df["high"].iloc[i])
+                asian_low[s] = min(asian_low[s], df["low"].iloc[i])
+
+    df["btc_asia_high"] = df["_session_id"].map(asian_high)
+    df["btc_asia_low"] = df["_session_id"].map(asian_low)
+    df["btc_asia_range"] = df["btc_asia_high"] - df["btc_asia_low"]
+    df["btc_asia_mid"] = (df["btc_asia_high"] + df["btc_asia_low"]) / 2
+
+    # Range compression: percentile of current range vs last 20 sessions
+    range_by_session = pd.Series(asian_high) - pd.Series(asian_low)
+    range_pctile = {}
+    sorted_sessions = sorted(range_by_session.keys())
+    for idx, s in enumerate(sorted_sessions):
+        if idx < 5:
+            range_pctile[s] = 50  # Not enough history
+        else:
+            lookback = [range_by_session[sorted_sessions[j]]
+                       for j in range(max(0, idx - 20), idx)
+                       if sorted_sessions[j] in range_by_session]
+            if lookback:
+                current = range_by_session[s]
+                pctile = sum(1 for x in lookback if x <= current) / len(lookback) * 100
+                range_pctile[s] = pctile
+            else:
+                range_pctile[s] = 50
+
+    df["btc_asia_range_pctile"] = df["_session_id"].map(range_pctile)
     df = df.drop(columns=["_session_id"])
 
     # HTF layers (4h + 1h)
@@ -366,5 +408,9 @@ def generate_btc_signals(df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
                                 if bp <= 0.45:
                                     signals.iloc[i] = BTCSignal.SHORT
                                     signal_types.iloc[i] = BTCSignalType.BTC_US_ORB
+
+        # London Breakout removed — doesn't generate enough trades on 15-min bars.
+        # 3 trades in 18 months, all losers. The breakout is too gradual
+        # for 15-min candles to capture cleanly.
 
     return signals, signal_types
