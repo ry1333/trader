@@ -14,8 +14,9 @@ from __future__ import annotations
 
 import os
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import httpx
 import numpy as np
@@ -37,6 +38,15 @@ from src.notifications.discord import (
 )
 from src.strategy.regime import add_regime
 from src.strategy.signals_v3 import Signal, SignalType, generate_signals_v3
+
+CT = ZoneInfo("US/Central")
+
+# Per-instrument configuration
+INSTRUMENT_CONFIG = {
+    "MNQ": {"tick_size": 0.25, "tick_value": 0.50, "max_position": 5},
+    "MGC": {"tick_size": 0.10, "tick_value": 1.00, "max_position": 3},
+    "MBT": {"tick_size": 5.00, "tick_value": 0.50, "max_position": 3},
+}
 
 
 class LiveBot:
@@ -64,6 +74,12 @@ class LiveBot:
 
         self.settings = load_settings()
 
+        # Instrument-specific config
+        inst_cfg = INSTRUMENT_CONFIG.get(instrument, INSTRUMENT_CONFIG["MNQ"])
+        self.tick_size = inst_cfg["tick_size"]
+        self.tick_value = inst_cfg["tick_value"]
+        self.max_position = inst_cfg["max_position"]
+
         # AI model (for MGC) or stats bank (for MNQ)
         self.use_ai = use_ai
         self.scorer: QualityRiskScorer | None = None
@@ -79,23 +95,37 @@ class LiveBot:
             logger.info(f"Loaded stats bank: {stats_bank_path}")
 
         # State
-        self.position: dict | None = None  # Current open position
         self.day_pnl: float = 0.0
         self.day_trades: int = 0
         self.total_pnl: float = 0.0
-        self.bars: pd.DataFrame = pd.DataFrame()
         self.last_bar_time: datetime | None = None
         self.signal_type_losses: dict[int, int] = {}
+        self.session_start_balance: float = 0.0  # Set at start of each day
+
+    # ── Time Helpers ──────────────────────────────────────────────────
+
+    @staticmethod
+    def _now_ct() -> datetime:
+        """Current time in US/Central, DST-aware."""
+        return datetime.now(timezone.utc).astimezone(CT)
+
+    @staticmethod
+    def _ct_minutes(ct: datetime) -> int:
+        """Convert CT datetime to minutes since midnight."""
+        return ct.hour * 60 + ct.minute
 
     # ── API Methods ───────────────────────────────────────────────────
 
     def _ensure_token(self) -> str:
-        if self.token and (time.time() - self.token_time) < 20 * 3600:
+        if self.token and (time.time() - self.token_time) < 12 * 3600:
             return self.token
-        resp = httpx.post(f"{self.base_url}/api/Auth/loginKey", json={
-            "userName": self.username, "apiKey": self.api_key,
-        }, timeout=15)
-        data = resp.json()
+        try:
+            resp = httpx.post(f"{self.base_url}/api/Auth/loginKey", json={
+                "userName": self.username, "apiKey": self.api_key,
+            }, timeout=15)
+            data = resp.json()
+        except (httpx.HTTPError, ValueError) as e:
+            raise RuntimeError(f"Auth request failed: {e}")
         if not data.get("success"):
             raise RuntimeError(f"Auth failed: {data}")
         self.token = data["token"]
@@ -110,9 +140,17 @@ class LiveBot:
         }
 
     def _post(self, path: str, body: dict) -> dict:
-        resp = httpx.post(f"{self.base_url}{path}", json=body,
-                          headers=self._headers(), timeout=15)
-        return resp.json()
+        try:
+            resp = httpx.post(f"{self.base_url}{path}", json=body,
+                              headers=self._headers(), timeout=15)
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPStatusError as e:
+            logger.error(f"API HTTP error {e.response.status_code}: {path}")
+            return {"success": False, "error": f"HTTP {e.response.status_code}"}
+        except (httpx.HTTPError, ValueError) as e:
+            logger.error(f"API request failed: {path} → {e}")
+            return {"success": False, "error": str(e)}
 
     def get_account(self) -> dict:
         data = self._post("/api/Account/search", {"onlyActiveAccounts": True})
@@ -124,13 +162,13 @@ class LiveBot:
 
     def get_bars(self, minutes_back: int = 500) -> pd.DataFrame:
         """Fetch recent 5-min bars."""
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         start = now - timedelta(minutes=minutes_back)
         data = self._post("/api/History/retrieveBars", {
             "contractId": self.contract_id,
             "live": False,
-            "startTime": start.isoformat() + "Z",
-            "endTime": now.isoformat() + "Z",
+            "startTime": start.isoformat(),
+            "endTime": now.isoformat(),
             "unit": 2,  # Minute
             "unitNumber": 5,
             "limit": 2000,
@@ -145,7 +183,14 @@ class LiveBot:
         df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
         return df.sort_values("timestamp").reset_index(drop=True)
 
-    def get_positions(self) -> list[dict]:
+    def get_positions_for_contract(self) -> list[dict]:
+        """Get open positions for THIS contract only."""
+        data = self._post("/api/Position/searchOpen", {"accountId": self.account_id})
+        all_positions = data.get("positions", [])
+        return [p for p in all_positions if p.get("contractId") == self.contract_id]
+
+    def get_all_positions(self) -> list[dict]:
+        """Get ALL open positions on the account."""
         data = self._post("/api/Position/searchOpen", {"accountId": self.account_id})
         return data.get("positions", [])
 
@@ -166,24 +211,34 @@ class LiveBot:
             body["takeProfitBracket"] = {"ticks": tp_ticks, "type": 1}
 
         data = self._post("/api/Order/place", body)
-        logger.info(f"Order placed: side={side} size={size} tag={tag} → {data}")
+        logger.info(f"Order placed: {self.instrument} side={side} size={size} "
+                    f"SL={sl_ticks} TP={tp_ticks} tag={tag} → {data}")
         return data
 
     def close_position(self) -> dict:
-        """Flatten all positions on this contract."""
+        """Flatten positions on this contract."""
         data = self._post("/api/Position/closeContract", {
             "accountId": self.account_id,
             "contractId": self.contract_id,
         })
-        logger.info(f"Position closed: {data}")
+        logger.info(f"Position closed ({self.instrument}): {data}")
         return data
 
     def cancel_all_orders(self) -> None:
-        """Cancel all open orders."""
+        """Cancel all open orders for this account."""
         orders = self._post("/api/Order/searchOpen", {"accountId": self.account_id})
         for o in orders.get("orders", []):
             self._post("/api/Order/cancel", {
                 "accountId": self.account_id, "orderId": o["id"]})
+
+    def _update_day_pnl(self) -> float:
+        """Update daily PnL from account balance vs session start balance.
+        Returns current day PnL."""
+        account = self.get_account()
+        balance = account.get("balance", 0)
+        if self.session_start_balance > 0:
+            self.day_pnl = balance - self.session_start_balance
+        return self.day_pnl
 
     # ── Trading Logic ─────────────────────────────────────────────────
 
@@ -192,40 +247,39 @@ class LiveBot:
         if len(df) < 100:
             return
 
-        # Get current time in Central
-        now_utc = datetime.utcnow()
-        # Simple CT conversion (UTC - 5 or 6 depending on DST)
-        ct_hour = (now_utc.hour - 5) % 24  # Approximate CT
-        ct_minutes = ct_hour * 60 + now_utc.minute
+        ct = self._now_ct()
+        ct_minutes = self._ct_minutes(ct)
 
         # ── Flatten check (3:00 PM CT = 900 min) ─────────────────────
         if ct_minutes >= 895:
-            positions = self.get_positions()
-            if positions:
-                logger.warning("FLATTEN: Closing all positions before 3:10 PM CT")
+            my_positions = self.get_positions_for_contract()
+            if my_positions:
+                logger.warning(f"FLATTEN {self.instrument}: Closing before 3:10 PM CT")
                 self.close_position()
                 self.cancel_all_orders()
-                notify_system_alert("Positions flattened for session close", "warning")
+                notify_system_alert(
+                    f"{self.instrument} positions flattened for session close", "warning")
             return
 
         # ── Don't trade outside 8:30 AM - 1:00 PM CT ─────────────────
         if ct_minutes < 510 or ct_minutes >= 780:
             return
 
-        # ── Check if we already have a position ───────────────────────
-        positions = self.get_positions()
-        if positions:
+        # ── Check if we already have a position on THIS contract ──────
+        my_positions = self.get_positions_for_contract()
+        if my_positions:
             return  # Already in a trade, let brackets handle exits
 
-        # ── Daily loss check ──────────────────────────────────────────
-        account = self.get_account()
-        balance = account.get("balance", 50000)
-        if self.day_pnl <= -500:
-            logger.warning(f"Daily loss tier1 hit: ${self.day_pnl:.0f}")
-            return
+        # ── Daily loss check (from actual account balance) ────────────
+        self._update_day_pnl()
         if self.day_pnl <= -1000:
-            logger.warning(f"Daily loss tier2 hit: ${self.day_pnl:.0f} — stopping for day")
+            logger.warning(f"{self.instrument} daily loss tier2 hit: "
+                          f"${self.day_pnl:.0f} — stopping for day")
             return
+        if self.day_pnl <= -500:
+            logger.warning(f"{self.instrument} daily loss tier1 hit: "
+                          f"${self.day_pnl:.0f} — 1 contract max")
+            # Don't return — still allow trading but at min size (handled below)
 
         # ── Compute features and signals ──────────────────────────────
         df = compute_features(df)
@@ -261,7 +315,7 @@ class LiveBot:
         if not pd.isna(atr_50) and atr_50 > 0 and atr > atr_50 * 2.0:
             return
 
-        # ── AI scoring (for MGC) or stats (for MNQ) ──────────────────
+        # ── AI scoring (for MGC) ──────────────────────────────────────
         if self.use_ai and self.scorer:
             from src.ai.features import extract_ai_features
             features = extract_ai_features(df, len(df) - 1)
@@ -284,28 +338,37 @@ class LiveBot:
             size_mult = 1.0
 
         # ── Compute stop/target in ticks ──────────────────────────────
-        TICK_MAP = {
-            "MNQ": (0.25, 0.50),
-            "MGC": (0.10, 1.00),
-            "MBT": (5.00, 0.50),
-        }
-        tick_size, tick_value = TICK_MAP.get(self.instrument, (0.25, 0.50))
-        sl_ticks = max(4, int(atr * sl_mult / tick_size))
+        sl_ticks = max(4, int(atr * sl_mult / self.tick_size))
         tp_ticks = max(4, int(sl_ticks * rr_ratio))
 
         # ── Position size ─────────────────────────────────────────────
+        account = self.get_account()
+        balance = account.get("balance", 50000)
         risk_budget = min(200, balance * 0.004)  # $200 or 0.4% of balance
-        risk_per_contract = sl_ticks * tick_value
-        size = max(1, min(5, int(risk_budget / risk_per_contract * size_mult)))
+        risk_per_contract = sl_ticks * self.tick_value
+        size = max(1, min(self.max_position,
+                         int(risk_budget / risk_per_contract * size_mult)))
 
         # Apply session quality multiplier
         size = max(1, int(size * session.size_multiplier))
 
+        # Tier1 daily loss: force 1 contract
+        if self.day_pnl <= -500:
+            size = 1
+
+        # ── Portfolio heat check: max 2 simultaneous positions ────────
+        all_positions = self.get_all_positions()
+        if len(all_positions) >= 2:
+            logger.info(f"{self.instrument}: skipping — portfolio heat "
+                       f"({len(all_positions)} positions open)")
+            return
+
         # ── Place order ───────────────────────────────────────────────
         side = 0 if direction == 1 else 1  # 0=Buy, 1=Sell
-        tag = f"{strategy_name}_{datetime.utcnow().strftime('%H%M%S')}"
+        tag = f"{self.instrument}_{strategy_name}_{ct.strftime('%H%M%S')}"
 
-        logger.info(f"TRADE: {strategy_name} {'LONG' if direction==1 else 'SHORT'} "
+        logger.info(f"TRADE: {self.instrument} {strategy_name} "
+                    f"{'LONG' if direction==1 else 'SHORT'} "
                     f"size={size} SL={sl_ticks}ticks TP={tp_ticks}ticks")
 
         result = self.place_order(side, size, sl_ticks, tp_ticks, tag)
@@ -318,16 +381,23 @@ class LiveBot:
                 size, strategy_name, session.size_multiplier)
             logger.info(f"Order filled: {result.get('orderId')}")
         else:
-            logger.error(f"Order FAILED: {result}")
-            notify_system_alert(f"Order failed: {result}", "error")
+            logger.error(f"Order FAILED ({self.instrument}): {result}")
+            notify_system_alert(f"{self.instrument} order failed: {result}", "error")
 
     # ── Main Loop ─────────────────────────────────────────────────────
 
     def run(self) -> None:
         """Main trading loop. Polls every 60 seconds for new bars."""
         logger.info(f"Starting LiveBot: {self.instrument} on account {self.account_id}")
+
+        # Record starting balance for PnL tracking
+        account = self.get_account()
+        self.session_start_balance = account.get("balance", 50000)
+        logger.info(f"Session start balance: ${self.session_start_balance:,.0f}")
+
         notify_system_alert(
-            f"Bot started: {self.instrument} on ${self.get_account().get('balance', 0):,.0f} account",
+            f"Bot started: {self.instrument} on "
+            f"${self.session_start_balance:,.0f} account",
             "success")
 
         poll_interval = 60  # seconds
@@ -335,21 +405,32 @@ class LiveBot:
 
         while True:
             try:
-                now_utc = datetime.utcnow()
-                ct_hour = (now_utc.hour - 5) % 24
-                ct_minutes = ct_hour * 60 + now_utc.minute
-                current_date = now_utc.strftime("%Y-%m-%d")
+                ct = self._now_ct()
+                ct_minutes = self._ct_minutes(ct)
+                current_date = ct.strftime("%Y-%m-%d")
 
                 # New day reset
                 if current_date != last_date and last_date:
+                    # Update final PnL from account
+                    self._update_day_pnl()
+
                     # Send daily summary
                     notify_daily_summary(
                         last_date, self.day_trades, self.day_pnl, 0,
                         0, self.total_pnl)
+
+                    # Reset for new day
+                    self.total_pnl += self.day_pnl
                     self.day_pnl = 0
                     self.day_trades = 0
                     self.signal_type_losses.clear()
-                    logger.info(f"New trading day: {current_date}")
+
+                    # Update session start balance for new day
+                    account = self.get_account()
+                    self.session_start_balance = account.get("balance",
+                                                             self.session_start_balance)
+                    logger.info(f"New trading day: {current_date}, "
+                               f"balance: ${self.session_start_balance:,.0f}")
                 last_date = current_date
 
                 # Only active during trading hours (8:00 AM - 3:15 PM CT)
@@ -359,11 +440,12 @@ class LiveBot:
 
                 # Flatten at 3:00 PM CT
                 if ct_minutes >= 895:
-                    positions = self.get_positions()
-                    if positions:
+                    my_positions = self.get_positions_for_contract()
+                    if my_positions:
                         self.close_position()
                         self.cancel_all_orders()
-                        notify_system_alert("Session flatten", "warning")
+                        notify_system_alert(
+                            f"{self.instrument} session flatten", "warning")
                     time.sleep(300)
                     continue
 
@@ -380,11 +462,13 @@ class LiveBot:
 
             except KeyboardInterrupt:
                 logger.info("Bot stopped by user")
-                notify_system_alert("Bot stopped by user", "warning")
+                notify_system_alert(
+                    f"{self.instrument} bot stopped by user", "warning")
                 break
             except Exception as e:
-                logger.error(f"Error in main loop: {e}")
-                notify_system_alert(f"Bot error: {e}", "error")
+                logger.error(f"Error in main loop ({self.instrument}): {e}")
+                notify_system_alert(
+                    f"{self.instrument} bot error: {e}", "error")
                 time.sleep(30)  # Wait and retry
 
 
