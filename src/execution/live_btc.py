@@ -130,8 +130,8 @@ class LiveBTCBot:
                 return a
         return accounts[0] if accounts else {}
 
-    def get_bars_5m(self, minutes_back: int = 3000) -> pd.DataFrame:
-        """Fetch 5-min bars and resample to 15-min."""
+    def get_bars_15m(self, minutes_back: int = 50000) -> pd.DataFrame:
+        """Fetch 15-min bars directly from API. ~35 days at 5000 bar limit."""
         now = datetime.now(timezone.utc)
         start = now - timedelta(minutes=minutes_back)
         data = self._post("/api/History/retrieveBars", {
@@ -140,8 +140,8 @@ class LiveBTCBot:
             "startTime": start.isoformat(),
             "endTime": now.isoformat(),
             "unit": 2,  # Minute
-            "unitNumber": 5,
-            "limit": 2000,
+            "unitNumber": 15,
+            "limit": 5000,
             "includePartialBar": False,
         })
         bars = data.get("bars", [])
@@ -151,15 +151,7 @@ class LiveBTCBot:
         df = df.rename(columns={"t": "timestamp", "o": "open", "h": "high",
                                 "l": "low", "c": "close", "v": "volume"})
         df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
-        df = df.sort_values("timestamp").reset_index(drop=True)
-
-        # Resample to 15-min
-        df_15m = df.set_index("timestamp").resample("15min", label="left", closed="left").agg({
-            "open": "first", "high": "max", "low": "min",
-            "close": "last", "volume": "sum",
-        }).dropna().reset_index()
-
-        return df_15m
+        return df.sort_values("timestamp").reset_index(drop=True)
 
     def get_positions_for_contract(self) -> list[dict]:
         data = self._post("/api/Position/searchOpen", {"accountId": self.account_id})
@@ -426,7 +418,7 @@ class LiveBTCBot:
                     continue
 
                 # Fetch and process bars
-                df_15m = self.get_bars_5m(minutes_back=3000)  # ~50 hours
+                df_15m = self.get_bars_15m()  # 15-min bars directly, ~35 days
                 if len(df_15m) > 30:
                     latest_ts = df_15m["timestamp"].iloc[-1]
                     if self.last_bar_time is None or latest_ts > self.last_bar_time:

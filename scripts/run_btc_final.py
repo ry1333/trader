@@ -71,13 +71,18 @@ def run_btc_variant_d(df, risk_cfg, bt_cfg, stats_bank=None, training_mode=False
                 atr = abs(active.entry_price - active.sl_price) / 2
 
             exit_price, exit_reason = None, ""
+            is_london_bo = getattr(active, "_sig_type", 0) == BTCSignalType.BTC_LONDON_BREAKOUT
+
+            # London breakout hard exit: 8:00 AM ET (480 min)
+            if is_london_bo and et_min >= 480:
+                exit_price, exit_reason = row["close"], "london_time_exit"
 
             # Flatten
-            if 955 <= et_min < 1080:
+            if exit_price is None and 955 <= et_min < 1080:
                 exit_price, exit_reason = row["close"], "maintenance_flatten"
-            elif dow == 4 and et_min >= 950:
+            elif exit_price is None and dow == 4 and et_min >= 950:
                 exit_price, exit_reason = row["close"], "friday_flatten"
-            elif bars_held >= max_hold:
+            elif exit_price is None and bars_held >= max_hold:
                 if current_pnl <= 0:
                     exit_price, exit_reason = row["close"], "max_hold"
                 elif active.peak_profit > 0 and current_pnl < active.peak_profit * 0.40:
@@ -152,6 +157,8 @@ def run_btc_variant_d(df, risk_cfg, bt_cfg, stats_bank=None, training_mode=False
                 strategy_name = BTCSignalType(sig_type).name
 
                 # Stats-optimized or default
+                is_london_bo = sig_type == BTCSignalType.BTC_LONDON_BREAKOUT
+
                 if stats_bank:
                     sl_mult, rr = stats_bank.get_exit_params(strategy_name, direction)
                     size_mult = stats_bank.get_size_multiplier(strategy_name, direction)
@@ -166,10 +173,30 @@ def run_btc_variant_d(df, risk_cfg, bt_cfg, stats_bank=None, training_mode=False
                     size_mult = 1.0
 
                 entry_price = row["close"] + bt_cfg.slippage_ticks * bt_cfg.tick_size * direction
-                sl_ticks = max(4, int(atr * sl_mult / bt_cfg.tick_size))
-                tp_ticks = max(4, int(sl_ticks * rr))
-                sl_price = entry_price - sl_ticks * bt_cfg.tick_size * direction
-                tp_price = entry_price + tp_ticks * bt_cfg.tick_size * direction
+
+                if is_london_bo:
+                    # London breakout: stop at Asian range midpoint
+                    asia_mid = row.get("btc_asia_mid", None)
+                    asia_range = row.get("btc_asia_range", None)
+                    if pd.isna(asia_mid) or pd.isna(asia_range) or asia_range <= 0:
+                        eq_curve.append(equity)
+                        continue
+                    sl_price = asia_mid  # Midpoint stop
+                    stop_dist = abs(entry_price - sl_price)
+                    if stop_dist <= 0 or stop_dist / row["close"] > 0.01:  # Max 1% stop
+                        eq_curve.append(equity)
+                        continue
+                    sl_ticks = max(4, int(stop_dist / bt_cfg.tick_size))
+                    # Target: 1.5x range width from entry
+                    tp_dist = asia_range * 1.5
+                    tp_ticks = max(4, int(tp_dist / bt_cfg.tick_size))
+                    tp_price = entry_price + tp_ticks * bt_cfg.tick_size * direction
+                else:
+                    # Trend pullback / US ORB: ATR-based stops
+                    sl_ticks = max(4, int(atr * sl_mult / bt_cfg.tick_size))
+                    tp_ticks = max(4, int(sl_ticks * rr))
+                    sl_price = entry_price - sl_ticks * bt_cfg.tick_size * direction
+                    tp_price = entry_price + tp_ticks * bt_cfg.tick_size * direction
 
                 risk_per = sl_ticks * bt_cfg.tick_value
                 size = max(1, min(3, int(200 / risk_per * size_mult))) if risk_per > 0 else 1
