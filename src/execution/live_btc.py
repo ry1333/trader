@@ -431,11 +431,17 @@ class LiveBTCBot:
                     latest_ts = df_15m["timestamp"].iloc[-1]
                     if self.last_bar_time is None or latest_ts > self.last_bar_time:
                         self.last_bar_time = latest_ts
+                        logger.info(f"BTC: New 15m bar {latest_ts}, "
+                                   f"{len(df_15m)} bars, "
+                                   f"close={df_15m.iloc[-1]['close']:.0f}, "
+                                   f"window={'YES' if in_trading_window else 'NO'}")
 
                         # Always check Chandelier exits on active positions
                         # Only enter new trades during trading windows
                         if in_trading_window or self.active_direction != 0:
                             self.process_bars(df_15m)
+                elif len(df_15m) == 0:
+                    logger.warning("BTC: No bars returned from API")
 
                 time.sleep(poll_interval)
 
